@@ -21,6 +21,12 @@ from src.tools.market_data import (
     MarketDataOutput,
     MarketDataTool,
 )
+from src.tools.news_search import (
+    NewsItem,
+    NewsSearchInput,
+    NewsSearchOutput,
+    NewsSearchTool,
+)
 
 __all__ = [
     "BaseTool",
@@ -28,6 +34,10 @@ __all__ = [
     "MarketDataInput",
     "MarketDataOutput",
     "MarketDataTool",
+    "NewsItem",
+    "NewsSearchInput",
+    "NewsSearchOutput",
+    "NewsSearchTool",
     "ToolExecutionError",
     "ToolInput",
     "ToolOutput",
