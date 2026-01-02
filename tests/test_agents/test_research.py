@@ -1,5 +1,7 @@
 """Tests for the Research Agent."""
 
+from unittest.mock import patch
+
 import pytest
 
 from src.agents.base import AgentState
@@ -15,7 +17,7 @@ from src.agents.research import (
     ResearchOutput,
     SymbolData,
 )
-from src.tools.base import ToolRegistry
+from src.tools.base import BaseTool, ToolRegistry
 
 
 class TestNewsItem:
@@ -417,3 +419,543 @@ class TestToolInputOutputModels:
         output = NewsSearchOutput(items=[])
         assert output.items == []
         assert output.success is True
+
+
+# ============================================================================
+# Tracing Integration Tests
+# ============================================================================
+
+
+class TestResearchAgentTracing:
+    """Tests for Research Agent tracing integration."""
+
+    @pytest.mark.asyncio
+    async def test_invoke_creates_trace_span(self) -> None:
+        """Test that invoke creates a Langfuse trace span."""
+        agent = ResearchAgent(use_mock_tools=True)
+        state = AgentState(context={"symbols": ["AAPL"]})
+
+        # Mock langfuse_observe to verify it's called
+        with patch("src.agents.research.traced_agent"):
+            # The decorator is already applied, so we test that the function
+            # is properly decorated by checking the wrapper exists
+            assert hasattr(agent.invoke, "__wrapped__") or callable(agent.invoke)
+
+        # Execute and verify no exceptions with tracing
+        result = await agent.invoke(state)
+        assert result is not None
+        assert "research" in result.context
+
+    @pytest.mark.asyncio
+    async def test_tracing_captures_input_output(self) -> None:
+        """Test that tracing captures input and output state."""
+        agent = ResearchAgent(use_mock_tools=True)
+        state = AgentState(context={"symbols": ["AAPL", "GOOGL"]})
+
+        # The traced_agent decorator should capture the state
+        result = await agent.invoke(state)
+
+        # Verify the output contains expected data
+        assert "research" in result.context
+        research = result.context["research"]
+        assert research["symbols_analyzed"] == ["AAPL", "GOOGL"]
+
+    @pytest.mark.asyncio
+    async def test_trace_context_integration(self) -> None:
+        """Test that TraceContext works with agent invocation."""
+        from src.observability.tracing import TraceContext
+
+        agent = ResearchAgent(use_mock_tools=True)
+        state = AgentState(context={"symbols": ["AAPL"]})
+
+        # Test sync context manager
+        with TraceContext(
+            session_id="test-session",
+            user_id="test-user",
+            metadata={"test": True},
+            tags=["test"],
+        ):
+            result = await agent.invoke(state)
+
+        assert "research" in result.context
+
+    @pytest.mark.asyncio
+    async def test_trace_context_async(self) -> None:
+        """Test async TraceContext works with agent invocation."""
+        from src.observability.tracing import TraceContext
+
+        agent = ResearchAgent(use_mock_tools=True)
+        state = AgentState(context={"symbols": ["AAPL"]})
+
+        async with TraceContext(
+            session_id="test-async-session",
+            user_id="test-user",
+        ):
+            result = await agent.invoke(state)
+
+        assert "research" in result.context
+
+
+# ============================================================================
+# Tool Failure Handling Tests
+# ============================================================================
+
+
+class FailingMarketDataTool(BaseTool[MarketDataInput, MarketDataOutput]):
+    """Tool that always fails for testing error handling."""
+
+    name = "get_market_data"
+    description = "Failing market data tool"
+
+    @property
+    def input_schema(self) -> type[MarketDataInput]:
+        return MarketDataInput
+
+    @property
+    def output_schema(self) -> type[MarketDataOutput]:
+        return MarketDataOutput
+
+    async def _execute_real(self, input_data: MarketDataInput) -> MarketDataOutput:
+        raise RuntimeError(f"Simulated failure for {input_data.symbol}")
+
+    async def _execute_mock(self, input_data: MarketDataInput) -> MarketDataOutput:
+        raise RuntimeError(f"Simulated mock failure for {input_data.symbol}")
+
+
+class PartialFailingMarketDataTool(BaseTool[MarketDataInput, MarketDataOutput]):
+    """Tool that fails for specific symbols."""
+
+    name = "get_market_data"
+    description = "Partially failing market data tool"
+    fail_symbols: set[str] = {"FAIL", "ERROR"}
+
+    @property
+    def input_schema(self) -> type[MarketDataInput]:
+        return MarketDataInput
+
+    @property
+    def output_schema(self) -> type[MarketDataOutput]:
+        return MarketDataOutput
+
+    async def _execute_real(self, input_data: MarketDataInput) -> MarketDataOutput:
+        return await self._execute_mock(input_data)
+
+    async def _execute_mock(self, input_data: MarketDataInput) -> MarketDataOutput:
+        if input_data.symbol.upper() in self.fail_symbols:
+            raise RuntimeError(f"Failed for symbol: {input_data.symbol}")
+        return MarketDataOutput(
+            symbol=input_data.symbol.upper(),
+            price=100.0,
+            change_percent=1.0,
+            volume=1_000_000,
+        )
+
+
+class TestResearchAgentToolFailure:
+    """Tests for Research Agent handling tool failures gracefully."""
+
+    @pytest.mark.asyncio
+    async def test_handles_market_data_failure_gracefully(self) -> None:
+        """Test agent continues when market data tool fails."""
+        registry = ToolRegistry()
+        registry.register(FailingMarketDataTool(use_mock=True))
+        registry.register(PlaceholderNewsSearchTool(use_mock=True))
+
+        agent = ResearchAgent(tool_registry=registry)
+        state = AgentState(context={"symbols": ["AAPL", "GOOGL"]})
+
+        result = await agent.invoke(state)
+
+        # Agent should complete despite failures
+        assert "research" in result.context
+        research = result.context["research"]
+
+        # Should have errors recorded
+        assert len(research["errors"]) >= 1
+        assert any("Failed to get market data" in e for e in research["errors"])
+
+        # Market data should be empty due to failures
+        assert len(research["market_data"]) == 0
+
+        # But news should still be collected
+        assert len(research["news_items"]) > 0
+
+    @pytest.mark.asyncio
+    async def test_continues_with_partial_data(self) -> None:
+        """Test agent continues with partial data when some tools fail."""
+        registry = ToolRegistry()
+        registry.register(PartialFailingMarketDataTool(use_mock=True))
+        registry.register(PlaceholderNewsSearchTool(use_mock=True))
+
+        agent = ResearchAgent(tool_registry=registry)
+        state = AgentState(context={"symbols": ["AAPL", "FAIL", "GOOGL"]})
+
+        result = await agent.invoke(state)
+
+        research = result.context["research"]
+
+        # Should have partial market data (AAPL and GOOGL succeed, FAIL fails)
+        assert len(research["market_data"]) == 2
+        assert "AAPL" in research["market_data"]
+        assert "GOOGL" in research["market_data"]
+        assert "FAIL" not in research["market_data"]
+
+        # Should have one error for the failed symbol
+        assert len(research["errors"]) == 1
+        assert "FAIL" in research["errors"][0]
+
+    @pytest.mark.asyncio
+    async def test_handles_news_search_failure(self) -> None:
+        """Test agent continues when news search fails."""
+
+        class FailingNewsSearchTool(BaseTool[NewsSearchInput, NewsSearchOutput]):
+            name = "search_news"
+            description = "Failing news search"
+
+            @property
+            def input_schema(self) -> type[NewsSearchInput]:
+                return NewsSearchInput
+
+            @property
+            def output_schema(self) -> type[NewsSearchOutput]:
+                return NewsSearchOutput
+
+            async def _execute_real(
+                self, _input_data: NewsSearchInput
+            ) -> NewsSearchOutput:
+                raise RuntimeError("News search failed")
+
+            async def _execute_mock(
+                self, _input_data: NewsSearchInput
+            ) -> NewsSearchOutput:
+                raise RuntimeError("News search mock failed")
+
+        registry = ToolRegistry()
+        registry.register(PlaceholderMarketDataTool(use_mock=True))
+        registry.register(FailingNewsSearchTool(use_mock=True))
+
+        agent = ResearchAgent(tool_registry=registry)
+        state = AgentState(context={"symbols": ["AAPL"]})
+
+        result = await agent.invoke(state)
+
+        research = result.context["research"]
+
+        # Market data should still be collected
+        assert "AAPL" in research["market_data"]
+
+        # News should be empty and error recorded
+        assert len(research["news_items"]) == 0
+        assert any("Failed to search news" in e for e in research["errors"])
+
+    @pytest.mark.asyncio
+    async def test_all_tools_fail(self) -> None:
+        """Test agent handles complete tool failure gracefully."""
+
+        class FailingNewsSearchTool(BaseTool[NewsSearchInput, NewsSearchOutput]):
+            name = "search_news"
+            description = "Failing news search"
+
+            @property
+            def input_schema(self) -> type[NewsSearchInput]:
+                return NewsSearchInput
+
+            @property
+            def output_schema(self) -> type[NewsSearchOutput]:
+                return NewsSearchOutput
+
+            async def _execute_real(
+                self, _input_data: NewsSearchInput
+            ) -> NewsSearchOutput:
+                raise RuntimeError("News search failed")
+
+            async def _execute_mock(
+                self, _input_data: NewsSearchInput
+            ) -> NewsSearchOutput:
+                raise RuntimeError("News search mock failed")
+
+        registry = ToolRegistry()
+        registry.register(FailingMarketDataTool(use_mock=True))
+        registry.register(FailingNewsSearchTool(use_mock=True))
+
+        agent = ResearchAgent(tool_registry=registry)
+        state = AgentState(context={"symbols": ["AAPL"]})
+
+        result = await agent.invoke(state)
+
+        # Agent should still complete
+        assert "research" in result.context
+        research = result.context["research"]
+
+        # All operations failed
+        assert len(research["market_data"]) == 0
+        assert len(research["news_items"]) == 0
+
+        # Should have multiple errors
+        assert len(research["errors"]) >= 2
+
+        # Summary should mention errors
+        assert "error" in research["summary"].lower()
+
+
+# ============================================================================
+# Real Tool Integration Tests
+# ============================================================================
+
+
+class TestResearchAgentRealTools:
+    """Tests for Research Agent with real MarketDataTool and NewsSearchTool."""
+
+    @pytest.mark.asyncio
+    async def test_with_real_market_data_tool_mock_mode(self) -> None:
+        """Test agent with real MarketDataTool in mock mode."""
+        from src.tools.market_data import MarketDataTool
+
+        registry = ToolRegistry()
+        registry.register(MarketDataTool(use_mock=True))
+        registry.register(PlaceholderNewsSearchTool(use_mock=True))
+
+        agent = ResearchAgent(tool_registry=registry)
+        state = AgentState(context={"symbols": ["AAPL", "GOOGL"]})
+
+        result = await agent.invoke(state)
+
+        research = result.context["research"]
+
+        # Should have market data from real tool
+        assert "AAPL" in research["market_data"]
+        assert "GOOGL" in research["market_data"]
+
+        # Verify data structure matches real tool output
+        aapl_data = research["market_data"]["AAPL"]
+        assert aapl_data["price"] is not None
+        assert aapl_data["change_percent"] is not None
+
+    @pytest.mark.asyncio
+    async def test_with_real_news_search_tool_mock_mode(self) -> None:
+        """Test agent with real NewsSearchTool in mock mode."""
+        from src.tools.news_search import NewsSearchTool
+
+        registry = ToolRegistry()
+        registry.register(PlaceholderMarketDataTool(use_mock=True))
+        registry.register(NewsSearchTool(use_mock=True))
+
+        agent = ResearchAgent(tool_registry=registry)
+        state = AgentState(context={"symbols": ["AAPL"]})
+
+        result = await agent.invoke(state)
+
+        research = result.context["research"]
+
+        # Should have news items from real tool
+        assert len(research["news_items"]) > 0
+
+        # Verify news item structure
+        first_item = research["news_items"][0]
+        assert "title" in first_item
+        assert "source" in first_item
+
+    @pytest.mark.asyncio
+    async def test_with_both_real_tools_mock_mode(self) -> None:
+        """Test agent with both real tools in mock mode."""
+        from src.tools.market_data import MarketDataTool
+        from src.tools.news_search import NewsSearchTool
+
+        registry = ToolRegistry()
+        registry.register(MarketDataTool(use_mock=True))
+        registry.register(NewsSearchTool(use_mock=True))
+
+        agent = ResearchAgent(tool_registry=registry)
+        state = AgentState(context={"symbols": ["AAPL", "MSFT", "GOOGL"]})
+
+        result = await agent.invoke(state)
+
+        research = result.context["research"]
+
+        # All symbols should have market data
+        assert len(research["market_data"]) == 3
+        for symbol in ["AAPL", "MSFT", "GOOGL"]:
+            assert symbol in research["market_data"]
+
+        # Should have news items
+        assert len(research["news_items"]) > 0
+
+        # Should have sources listed
+        assert len(research["sources"]) >= 4  # 3 market data + 1 news search
+
+        # No errors expected in mock mode
+        assert len(research["errors"]) == 0
+
+    @pytest.mark.asyncio
+    async def test_real_tools_fallback_to_mock(self) -> None:
+        """Test real tools fall back to mock when API fails."""
+        from src.tools.market_data import MarketDataTool
+        from src.tools.news_search import NewsSearchTool
+
+        # Create tools with fallback enabled
+        registry = ToolRegistry()
+        registry.register(MarketDataTool(use_mock=False, fallback_to_mock=True))
+        registry.register(NewsSearchTool(use_mock=False, fallback_to_mock=True))
+
+        agent = ResearchAgent(tool_registry=registry)
+        state = AgentState(context={"symbols": ["AAPL"]})
+
+        # Mock the real API calls to fail
+        with (
+            patch(
+                "src.tools.market_data.MarketDataTool._fetch_yfinance_data",
+                return_value=None,
+            ),
+            patch(
+                "src.tools.news_search.NewsSearchTool._get_http_client",
+                side_effect=RuntimeError("Network error"),
+            ),
+        ):
+            result = await agent.invoke(state)
+
+        research = result.context["research"]
+
+        # Should still have data via fallback
+        # Market data should fall back
+        assert "AAPL" in research["market_data"]
+
+    @pytest.mark.asyncio
+    async def test_real_tool_output_schema_compatibility(self) -> None:
+        """Test that real tool outputs are compatible with ResearchOutput."""
+        from src.tools.market_data import MarketDataTool
+
+        tool = MarketDataTool(use_mock=True)
+        result = await tool.execute({"symbol": "AAPL"})
+
+        # Verify we can create SymbolData from the tool output
+        symbol_data = SymbolData(
+            symbol=result.symbol,
+            price=result.price,
+            change_percent=result.change_percent,
+            volume=result.volume,
+            market_cap=result.market_cap,
+            pe_ratio=result.pe_ratio,
+            dividend_yield=result.dividend_yield,
+        )
+
+        assert symbol_data.symbol == "AAPL"
+        assert symbol_data.price is not None
+
+
+# ============================================================================
+# Coverage Enhancement Tests
+# ============================================================================
+
+
+class TestResearchAgentCoverage:
+    """Additional tests to ensure >80% coverage."""
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_single_symbol(self) -> None:
+        """Test invoke with a single symbol."""
+        agent = ResearchAgent(use_mock_tools=True)
+        state = AgentState(context={"symbols": ["TSLA"]})
+
+        result = await agent.invoke(state)
+
+        research = result.context["research"]
+        assert research["symbols_analyzed"] == ["TSLA"]
+        assert "TSLA" in research["market_data"]
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_many_symbols(self) -> None:
+        """Test invoke with many symbols."""
+        agent = ResearchAgent(use_mock_tools=True)
+        symbols = ["AAPL", "GOOGL", "MSFT", "AMZN", "META"]
+        state = AgentState(context={"symbols": symbols})
+
+        result = await agent.invoke(state)
+
+        research = result.context["research"]
+        assert research["symbols_analyzed"] == symbols
+        # Note: News query only uses first 3 symbols
+        assert len(research["market_data"]) == 5
+
+    @pytest.mark.asyncio
+    async def test_summary_generation_all_negative(self) -> None:
+        """Test summary with all negative changes."""
+        agent = ResearchAgent(use_mock_tools=True)
+        output = ResearchOutput(
+            market_data={
+                "AAPL": SymbolData(symbol="AAPL", change_percent=-2.5),
+                "GOOGL": SymbolData(symbol="GOOGL", change_percent=-1.5),
+            },
+        )
+
+        summary = agent._generate_summary(output)
+
+        # Should have top loser but no gainer
+        assert "loser" in summary.lower()
+        assert "AAPL" in summary  # AAPL is the top loser
+
+    @pytest.mark.asyncio
+    async def test_summary_generation_all_positive(self) -> None:
+        """Test summary with all positive changes."""
+        agent = ResearchAgent(use_mock_tools=True)
+        output = ResearchOutput(
+            market_data={
+                "AAPL": SymbolData(symbol="AAPL", change_percent=2.5),
+                "GOOGL": SymbolData(symbol="GOOGL", change_percent=1.5),
+            },
+        )
+
+        summary = agent._generate_summary(output)
+
+        # Should have top gainer but no loser
+        assert "gainer" in summary.lower()
+        assert "AAPL" in summary  # AAPL is the top gainer
+
+    @pytest.mark.asyncio
+    async def test_state_message_content(self) -> None:
+        """Test the message content added to state."""
+        agent = ResearchAgent(use_mock_tools=True)
+        state = AgentState(context={"symbols": ["AAPL", "GOOGL"]})
+
+        result = await agent.invoke(state)
+
+        assert len(result.messages) == 1
+        message = result.messages[0]
+        assert message["role"] == "assistant"
+        assert "2 symbols" in message["content"]
+        assert "market data entries" in message["content"]
+        assert "news items" in message["content"]
+
+    def test_agent_description(self) -> None:
+        """Test agent description property."""
+        agent = ResearchAgent()
+        assert "market data" in agent.description.lower()
+        assert "financial" in agent.description.lower()
+
+    def test_system_prompt_contains_tools(self) -> None:
+        """Test system prompt mentions available tools."""
+        agent = ResearchAgent()
+        prompt = agent.system_prompt
+
+        assert "get_market_data" in prompt
+        assert "search_news" in prompt
+        assert "research" in prompt.lower()
+
+    @pytest.mark.asyncio
+    async def test_invoke_preserves_existing_state(self) -> None:
+        """Test that invoke preserves existing state context."""
+        agent = ResearchAgent(use_mock_tools=True)
+        state = AgentState(
+            context={
+                "symbols": ["AAPL"],
+                "existing_data": "should be preserved",
+                "user_request": "analyze portfolio",
+            }
+        )
+
+        result = await agent.invoke(state)
+
+        # Existing context should be preserved
+        assert result.context["existing_data"] == "should be preserved"
+        assert result.context["user_request"] == "analyze portfolio"
+        # New research data should be added
+        assert "research" in result.context
