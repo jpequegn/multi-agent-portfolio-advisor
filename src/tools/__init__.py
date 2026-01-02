@@ -27,9 +27,25 @@ from src.tools.news_search import (
     NewsSearchOutput,
     NewsSearchTool,
 )
+from src.tools.risk_metrics import (
+    AttributionResult,
+    AttributionTool,
+    BenchmarkComparison,
+    BenchmarkComparisonTool,
+    CorrelationResult,
+    CorrelationTool,
+    RiskMetrics,
+    RiskMetricsTool,
+)
 
 __all__ = [
+    "AttributionResult",
+    "AttributionTool",
     "BaseTool",
+    "BenchmarkComparison",
+    "BenchmarkComparisonTool",
+    "CorrelationResult",
+    "CorrelationTool",
     "MarketDataCache",
     "MarketDataInput",
     "MarketDataOutput",
@@ -38,6 +54,8 @@ __all__ = [
     "NewsSearchInput",
     "NewsSearchOutput",
     "NewsSearchTool",
+    "RiskMetrics",
+    "RiskMetricsTool",
     "ToolExecutionError",
     "ToolInput",
     "ToolOutput",
