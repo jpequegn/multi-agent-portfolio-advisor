@@ -7,5 +7,18 @@ This module contains specialized agents:
 """
 
 from src.agents.base import AgentState, BaseAgent
+from src.agents.research import (
+    NewsItem,
+    ResearchAgent,
+    ResearchOutput,
+    SymbolData,
+)
 
-__all__ = ["AgentState", "BaseAgent"]
+__all__ = [
+    "AgentState",
+    "BaseAgent",
+    "NewsItem",
+    "ResearchAgent",
+    "ResearchOutput",
+    "SymbolData",
+]
