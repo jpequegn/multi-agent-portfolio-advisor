@@ -6,6 +6,14 @@ This module contains specialized agents:
 - RecommendationAgent: Generates trade recommendations
 """
 
+from src.agents.analysis import (
+    AnalysisAgent,
+    AnalysisOutput,
+    AttributionResult,
+    BenchmarkComparison,
+    CorrelationResult,
+    RiskMetrics,
+)
 from src.agents.base import AgentState, BaseAgent
 from src.agents.research import (
     NewsItem,
@@ -16,9 +24,15 @@ from src.agents.research import (
 
 __all__ = [
     "AgentState",
+    "AnalysisAgent",
+    "AnalysisOutput",
+    "AttributionResult",
     "BaseAgent",
+    "BenchmarkComparison",
+    "CorrelationResult",
     "NewsItem",
     "ResearchAgent",
     "ResearchOutput",
+    "RiskMetrics",
     "SymbolData",
 ]
