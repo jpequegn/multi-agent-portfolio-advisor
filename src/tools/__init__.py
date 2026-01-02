@@ -37,6 +37,17 @@ from src.tools.risk_metrics import (
     RiskMetrics,
     RiskMetricsTool,
 )
+from src.tools.trade_generator import (
+    ComplianceResult,
+    ComplianceTool,
+    ExecutionCosts,
+    ExecutionCostTool,
+    RebalancingTool,
+    TaxImpact,
+    TaxImpactTool,
+    Trade,
+    TradeList,
+)
 
 __all__ = [
     "AttributionResult",
@@ -44,8 +55,12 @@ __all__ = [
     "BaseTool",
     "BenchmarkComparison",
     "BenchmarkComparisonTool",
+    "ComplianceResult",
+    "ComplianceTool",
     "CorrelationResult",
     "CorrelationTool",
+    "ExecutionCosts",
+    "ExecutionCostTool",
     "MarketDataCache",
     "MarketDataInput",
     "MarketDataOutput",
@@ -54,11 +69,16 @@ __all__ = [
     "NewsSearchInput",
     "NewsSearchOutput",
     "NewsSearchTool",
+    "RebalancingTool",
     "RiskMetrics",
     "RiskMetricsTool",
+    "TaxImpact",
+    "TaxImpactTool",
     "ToolExecutionError",
     "ToolInput",
     "ToolOutput",
     "ToolRegistry",
+    "Trade",
+    "TradeList",
     "default_registry",
 ]
