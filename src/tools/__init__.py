@@ -15,9 +15,19 @@ from src.tools.base import (
     ToolRegistry,
     default_registry,
 )
+from src.tools.market_data import (
+    MarketDataCache,
+    MarketDataInput,
+    MarketDataOutput,
+    MarketDataTool,
+)
 
 __all__ = [
     "BaseTool",
+    "MarketDataCache",
+    "MarketDataInput",
+    "MarketDataOutput",
+    "MarketDataTool",
     "ToolExecutionError",
     "ToolInput",
     "ToolOutput",
