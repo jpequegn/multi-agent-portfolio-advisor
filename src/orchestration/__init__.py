@@ -28,8 +28,22 @@ from src.orchestration.state import (
     validate_state,
     validate_state_or_raise,
 )
+from src.orchestration.workflow import (
+    analysis_node,
+    create_workflow,
+    default_workflow,
+    error_handler_node,
+    finalize_node,
+    recommendation_node,
+    research_node,
+    route_after_analysis,
+    route_after_recommendation,
+    route_after_research,
+    run_workflow,
+)
 
 __all__ = [
+    # State exports
     "AgentName",
     "AnalysisOutputDict",
     "Portfolio",
@@ -50,4 +64,16 @@ __all__ = [
     "update_state_with_result",
     "validate_state",
     "validate_state_or_raise",
+    # Workflow exports
+    "analysis_node",
+    "create_workflow",
+    "default_workflow",
+    "error_handler_node",
+    "finalize_node",
+    "recommendation_node",
+    "research_node",
+    "route_after_analysis",
+    "route_after_recommendation",
+    "route_after_research",
+    "run_workflow",
 ]
