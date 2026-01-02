@@ -5,3 +5,7 @@ This module contains specialized agents:
 - AnalysisAgent: Analyzes portfolio risk and performance
 - RecommendationAgent: Generates trade recommendations
 """
+
+from src.agents.base import AgentState, BaseAgent
+
+__all__ = ["AgentState", "BaseAgent"]
