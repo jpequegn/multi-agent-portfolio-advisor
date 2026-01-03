@@ -3,6 +3,7 @@
 This module contains:
 - Portfolio analysis endpoints
 - Health check endpoints
+- Request/response models
 """
 
 from src.api.health import (
@@ -24,6 +25,18 @@ from src.api.health import (
     reset_health_service,
     set_health_service,
 )
+from src.api.routes import (
+    AnalysisOutput,
+    AnalysisResponse,
+    AnalysisSummary,
+    ErrorResponse,
+    PortfolioRequest,
+    PositionRequest,
+    RecommendationOutput,
+    ResearchOutput,
+    app,
+    create_app,
+)
 
 __all__ = [
     # Health check classes
@@ -42,9 +55,22 @@ __all__ = [
     "ServiceStatus",
     # Configuration
     "DEFAULT_HEALTH_CONFIG",
-    # Factory and global instance
+    # Health service factory and global instance
     "create_health_service",
     "get_health_service",
     "reset_health_service",
     "set_health_service",
+    # Request models
+    "PortfolioRequest",
+    "PositionRequest",
+    # Response models
+    "AnalysisOutput",
+    "AnalysisResponse",
+    "AnalysisSummary",
+    "ErrorResponse",
+    "RecommendationOutput",
+    "ResearchOutput",
+    # App factory and instance
+    "app",
+    "create_app",
 ]
