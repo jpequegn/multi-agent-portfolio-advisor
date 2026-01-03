@@ -2,12 +2,25 @@
 
 This module contains:
 - Trace configuration
-- Custom metrics
+- Custom metrics and metadata
 - Cost attribution
 - Dashboard utilities
 - Nested span hierarchy support
+- Tagging system for categorization
 """
 
+from src.observability.metrics import (
+    AgentMetadata,
+    MetadataBuilder,
+    RequestMetadata,
+    Tag,
+    TagManager,
+    ToolMetadata,
+    collect_tags,
+    create_agent_metadata,
+    create_request_metadata,
+    create_tool_metadata,
+)
 from src.observability.tracing import (
     SpanContext,
     SpanLevel,
@@ -29,6 +42,18 @@ from src.observability.tracing import (
 )
 
 __all__ = [
+    # Metadata classes
+    "AgentMetadata",
+    "MetadataBuilder",
+    "RequestMetadata",
+    "Tag",
+    "TagManager",
+    "ToolMetadata",
+    # Metadata factory functions
+    "collect_tags",
+    "create_agent_metadata",
+    "create_request_metadata",
+    "create_tool_metadata",
     # Span hierarchy classes
     "SpanContext",
     "SpanLevel",
