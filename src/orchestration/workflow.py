@@ -11,6 +11,9 @@ from langgraph.graph import END, StateGraph
 
 from src.agents import AnalysisAgent, RecommendationAgent, ResearchAgent
 from src.agents.base import AgentState
+from langfuse import observe
+
+from src.observability.tracing import traced_agent
 from src.orchestration.state import (
     AgentName,
     PortfolioState,
@@ -29,6 +32,7 @@ logger = structlog.get_logger(__name__)
 # ============================================================================
 
 
+@traced_agent("research_agent")
 async def research_node(state: PortfolioState) -> PortfolioState:
     """Execute the research agent.
 
@@ -94,6 +98,7 @@ async def research_node(state: PortfolioState) -> PortfolioState:
     return state
 
 
+@traced_agent("analysis_agent")
 async def analysis_node(state: PortfolioState) -> PortfolioState:
     """Execute the analysis agent.
 
@@ -163,6 +168,7 @@ async def analysis_node(state: PortfolioState) -> PortfolioState:
     return state
 
 
+@traced_agent("recommendation_agent")
 async def recommendation_node(state: PortfolioState) -> PortfolioState:
     """Execute the recommendation agent.
 
@@ -238,6 +244,7 @@ async def recommendation_node(state: PortfolioState) -> PortfolioState:
     return state
 
 
+@observe(name="error_handler", as_type="span")
 async def error_handler_node(state: PortfolioState) -> PortfolioState:
     """Handle workflow errors.
 
@@ -266,6 +273,7 @@ async def error_handler_node(state: PortfolioState) -> PortfolioState:
     return state
 
 
+@observe(name="finalize", as_type="span")
 async def finalize_node(state: PortfolioState) -> PortfolioState:
     """Finalize the workflow.
 

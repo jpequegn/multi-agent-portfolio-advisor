@@ -18,6 +18,8 @@ import structlog
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from langfuse import get_client as get_langfuse_client
+from langfuse import observe
 from pydantic import BaseModel, Field
 
 from src.api.health import (
@@ -26,6 +28,7 @@ from src.api.health import (
     get_health_service,
     set_health_service,
 )
+from src.observability.tracing import TraceContext, flush_traces
 from src.orchestration.state import (
     Portfolio,
     PortfolioState,
@@ -412,59 +415,81 @@ def register_routes(app: FastAPI) -> None:
         and generate recommendations.
         """
         start_time = time.monotonic()
+        symbols = [p.symbol.upper() for p in request.positions]
 
-        try:
-            # Convert request to Portfolio model
-            positions = [
-                Position(
-                    symbol=p.symbol.upper(),
-                    quantity=p.quantity,
-                    cost_basis=p.cost_basis,
-                    sector=p.sector,
+        # Create trace context with metadata
+        async with TraceContext(
+            session_id=request.user_id,
+            user_id=request.user_id,
+            metadata={
+                "portfolio_size": len(request.positions),
+                "symbols": symbols,
+                "account_type": request.account_type,
+                "has_cash": request.cash > 0,
+            },
+            tags=["portfolio-analysis", request.account_type],
+        ):
+            try:
+                # Convert request to Portfolio model
+                positions = [
+                    Position(
+                        symbol=p.symbol.upper(),
+                        quantity=p.quantity,
+                        cost_basis=p.cost_basis,
+                        sector=p.sector,
+                    )
+                    for p in request.positions
+                ]
+
+                portfolio = Portfolio(
+                    positions=positions,
+                    total_value=request.total_value or sum(p.quantity for p in positions),
+                    cash=request.cash,
+                    account_type=request.account_type,
                 )
-                for p in request.positions
-            ]
 
-            portfolio = Portfolio(
-                positions=positions,
-                total_value=request.total_value or sum(p.quantity for p in positions),
-                cash=request.cash,
-                account_type=request.account_type,
-            )
+                # Create initial state
+                state = create_initial_state(
+                    portfolio=portfolio,
+                    user_request=request.user_request,
+                    user_id=request.user_id,
+                )
 
-            # Create initial state
-            state = create_initial_state(
-                portfolio=portfolio,
-                user_request=request.user_request,
-                user_id=request.user_id,
-            )
+                logger.info(
+                    "analysis_started",
+                    workflow_id=state["workflow_id"],
+                    trace_id=state["trace_id"],
+                    symbol_count=len(state["symbols"]),
+                )
 
-            logger.info(
-                "analysis_started",
-                workflow_id=state["workflow_id"],
-                trace_id=state["trace_id"],
-                symbol_count=len(state["symbols"]),
-            )
+                # Create and run workflow with tracing
+                workflow = create_workflow()
+                result_state: PortfolioState = await _run_traced_workflow(
+                    workflow, state, symbols
+                )
 
-            # Create and run workflow
-            workflow = create_workflow()
-            result_state: PortfolioState = await workflow.ainvoke(state)
+                latency_ms = (time.monotonic() - start_time) * 1000
 
-            latency_ms = (time.monotonic() - start_time) * 1000
+                # Score the trace based on success
+                _score_trace(result_state, latency_ms)
 
-            logger.info(
-                "analysis_completed",
-                workflow_id=result_state["workflow_id"],
-                status=result_state.get("status"),
-                latency_ms=round(latency_ms, 2),
-            )
+                logger.info(
+                    "analysis_completed",
+                    workflow_id=result_state["workflow_id"],
+                    status=result_state.get("status"),
+                    latency_ms=round(latency_ms, 2),
+                )
 
-            return _state_to_response(result_state, latency_ms)
+                return _state_to_response(result_state, latency_ms)
 
-        except Exception as e:
-            latency_ms = (time.monotonic() - start_time) * 1000
-            logger.error("analysis_failed", error=str(e), latency_ms=round(latency_ms, 2))
-            raise HTTPException(status_code=500, detail=f"Analysis failed: {e!s}") from e
+            except Exception as e:
+                latency_ms = (time.monotonic() - start_time) * 1000
+                logger.error("analysis_failed", error=str(e), latency_ms=round(latency_ms, 2))
+
+                # Record error in trace
+                _record_trace_error(str(e))
+
+                raise HTTPException(status_code=500, detail=f"Analysis failed: {e!s}") from e
 
     @app.get(
         "/analyze/{trace_id}",
@@ -513,7 +538,105 @@ def register_routes(app: FastAPI) -> None:
 
 
 # ============================================================================
-# Helper Functions
+# Tracing Helper Functions
+# ============================================================================
+
+
+@observe(name="portfolio_workflow")
+async def _run_traced_workflow(
+    workflow: Any, state: PortfolioState, symbols: list[str]
+) -> PortfolioState:
+    """Run workflow with Langfuse tracing.
+
+    Creates a traced span for the entire workflow execution.
+
+    Args:
+        workflow: LangGraph workflow instance.
+        state: Initial workflow state.
+        symbols: List of symbols being analyzed.
+
+    Returns:
+        Final workflow state.
+    """
+    # Add workflow metadata to current span
+    try:
+        langfuse = get_langfuse_client()
+        langfuse.trace(
+            name="portfolio_analysis",
+            metadata={
+                "workflow_id": state.get("workflow_id"),
+                "trace_id": state.get("trace_id"),
+                "symbols": symbols,
+                "symbol_count": len(symbols),
+            },
+        )
+    except Exception:
+        # Tracing is optional, don't fail if unavailable
+        pass
+
+    result: PortfolioState = await workflow.ainvoke(state)
+    return result
+
+
+def _score_trace(state: PortfolioState, latency_ms: float) -> None:
+    """Score the current trace based on workflow results.
+
+    Args:
+        state: Final workflow state.
+        latency_ms: Total latency in milliseconds.
+    """
+    try:
+        langfuse = get_langfuse_client()
+
+        # Score based on completion success
+        has_errors = bool(state.get("errors"))
+        status = state.get("status", "unknown")
+        success = status == WorkflowStatus.COMPLETED.value and not has_errors
+
+        langfuse.score(
+            name="completion_success",
+            value=1.0 if success else 0.0,
+            comment=f"Status: {status}, Errors: {len(state.get('errors', []))}",
+        )
+
+        # Score latency (1.0 for <5s, 0.5 for <15s, 0.0 for >15s)
+        if latency_ms < 5000:
+            latency_score = 1.0
+        elif latency_ms < 15000:
+            latency_score = 0.5
+        else:
+            latency_score = 0.0
+
+        langfuse.score(
+            name="latency_quality",
+            value=latency_score,
+            comment=f"Latency: {latency_ms:.0f}ms",
+        )
+
+    except Exception as e:
+        logger.debug("trace_scoring_failed", error=str(e))
+
+
+def _record_trace_error(error_message: str) -> None:
+    """Record an error in the current trace.
+
+    Args:
+        error_message: Error message to record.
+    """
+    try:
+        langfuse = get_langfuse_client()
+        langfuse.score(
+            name="completion_success",
+            value=0.0,
+            comment=f"Error: {error_message[:200]}",
+        )
+    except Exception:
+        # Tracing is optional
+        pass
+
+
+# ============================================================================
+# Response Helper Functions
 # ============================================================================
 
 
