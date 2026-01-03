@@ -4,15 +4,37 @@ This module provides tracing capabilities using Langfuse for comprehensive
 observability of agent workflows, LLM calls, and tool executions.
 
 Span Hierarchy:
-- Session: Top-level grouping for user sessions
-- Request: Individual API requests within a session
-- Agent: Agent execution spans
-- Tool: Tool/function call spans
-- Generation: LLM API calls
+    Session (user session)
+    └── Request (single portfolio analysis request)
+        ├── Preprocessing Span
+        ├── Research Agent Span
+        │   ├── Planning Span (LLM reasoning)
+        │   ├── get_market_data Tool Span
+        │   │   ├── input: {"symbols": ["AAPL", "GOOGL"]}
+        │   │   └── output: {"data": [...]}
+        │   ├── search_news Tool Span
+        │   └── Response Generation Span
+        ├── Analysis Agent Span
+        │   └── ...
+        ├── Recommendation Agent Span
+        │   └── ...
+        └── Postprocessing Span
+
+Features:
+- Nested span hierarchy with context propagation
+- Input/output capture for tool spans
+- Reasoning trace support for LLM spans
+- Preprocessing/postprocessing spans
+- Span level metadata (agent, tool, generation)
 """
 
+import asyncio
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from enum import Enum
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
@@ -24,6 +46,518 @@ logger = structlog.get_logger(__name__)
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+
+# ============================================================================
+# Span Level Enumeration
+# ============================================================================
+
+
+class SpanLevel(Enum):
+    """Levels in the span hierarchy."""
+
+    SESSION = "session"
+    REQUEST = "request"
+    PREPROCESSING = "preprocessing"
+    AGENT = "agent"
+    PLANNING = "planning"
+    TOOL = "tool"
+    GENERATION = "generation"
+    POSTPROCESSING = "postprocessing"
+
+
+# ============================================================================
+# Span Metadata
+# ============================================================================
+
+
+@dataclass
+class SpanMetadata:
+    """Metadata for a span in the hierarchy.
+
+    Attributes:
+        level: Level in the span hierarchy.
+        parent_span_id: ID of the parent span.
+        agent_name: Name of the agent (for agent-level spans).
+        tool_name: Name of the tool (for tool-level spans).
+        model: Model name (for generation spans).
+        input_data: Captured input data.
+        output_data: Captured output data.
+        reasoning: Captured reasoning/planning traces.
+        started_at: When the span started.
+        ended_at: When the span ended.
+        error: Error if the span failed.
+    """
+
+    level: SpanLevel
+    parent_span_id: str | None = None
+    agent_name: str | None = None
+    tool_name: str | None = None
+    model: str | None = None
+    input_data: dict[str, Any] | None = None
+    output_data: dict[str, Any] | None = None
+    reasoning: list[str] = field(default_factory=list)
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    ended_at: datetime | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for Langfuse metadata."""
+        return {
+            "level": self.level.value,
+            "parent_span_id": self.parent_span_id,
+            "agent_name": self.agent_name,
+            "tool_name": self.tool_name,
+            "model": self.model,
+            "has_input": self.input_data is not None,
+            "has_output": self.output_data is not None,
+            "has_reasoning": len(self.reasoning) > 0,
+            "started_at": self.started_at.isoformat(),
+            "ended_at": self.ended_at.isoformat() if self.ended_at else None,
+            "has_error": self.error is not None,
+        }
+
+
+# ============================================================================
+# Span Context Manager
+# ============================================================================
+
+
+class SpanContext:
+    """Context manager for creating nested spans.
+
+    Provides explicit control over span hierarchy with support for
+    adding reasoning traces and capturing input/output.
+
+    Example:
+        async with SpanContext(
+            name="research_agent",
+            level=SpanLevel.AGENT,
+            metadata={"symbols": ["AAPL"]},
+        ) as span:
+            span.add_reasoning("Analyzing market data for AAPL")
+            span.set_input({"symbols": ["AAPL"]})
+            result = await do_research()
+            span.set_output({"data": result})
+    """
+
+    def __init__(
+        self,
+        name: str,
+        level: SpanLevel,
+        *,
+        parent_span_id: str | None = None,
+        agent_name: str | None = None,
+        tool_name: str | None = None,
+        model: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+        capture_input: bool = True,
+        capture_output: bool = True,
+    ) -> None:
+        """Initialize span context.
+
+        Args:
+            name: Name of the span.
+            level: Level in the span hierarchy.
+            parent_span_id: Optional parent span ID for nesting.
+            agent_name: Agent name (for agent-level spans).
+            tool_name: Tool name (for tool-level spans).
+            model: Model name (for generation spans).
+            metadata: Additional metadata to attach.
+            tags: Tags for the span.
+            capture_input: Whether to capture input data.
+            capture_output: Whether to capture output data.
+        """
+        self.name = name
+        self.level = level
+        self.parent_span_id = parent_span_id
+        self.metadata = metadata or {}
+        self.tags = tags or []
+        self.capture_input = capture_input
+        self.capture_output = capture_output
+
+        self._span_metadata = SpanMetadata(
+            level=level,
+            parent_span_id=parent_span_id,
+            agent_name=agent_name,
+            tool_name=tool_name,
+            model=model,
+        )
+        self._langfuse_span: Any = None
+        self._span_id: str | None = None
+
+    @property
+    def span_id(self) -> str | None:
+        """Get the span ID."""
+        return self._span_id
+
+    def add_reasoning(self, reasoning: str) -> None:
+        """Add a reasoning trace to the span.
+
+        Args:
+            reasoning: Reasoning text to capture.
+        """
+        self._span_metadata.reasoning.append(reasoning)
+        logger.debug("span_reasoning_added", span=self.name, reasoning=reasoning[:100])
+
+    def set_input(self, input_data: dict[str, Any]) -> None:
+        """Set input data for the span.
+
+        Args:
+            input_data: Input data to capture.
+        """
+        if self.capture_input:
+            self._span_metadata.input_data = input_data
+            if self._langfuse_span:
+                self._langfuse_span.update(input=input_data)
+
+    def set_output(self, output_data: dict[str, Any]) -> None:
+        """Set output data for the span.
+
+        Args:
+            output_data: Output data to capture.
+        """
+        if self.capture_output:
+            self._span_metadata.output_data = output_data
+            if self._langfuse_span:
+                self._langfuse_span.update(output=output_data)
+
+    def set_error(self, error: str | Exception) -> None:
+        """Mark the span as failed with an error.
+
+        Args:
+            error: Error message or exception.
+        """
+        self._span_metadata.error = str(error)
+        if self._langfuse_span:
+            self._langfuse_span.update(
+                level="ERROR",
+                status_message=str(error),
+            )
+
+    async def __aenter__(self) -> "SpanContext":
+        """Enter async context and start the span."""
+        return self._start_span()
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Exit async context and end the span."""
+        self._end_span(exc_val)
+
+    def __enter__(self) -> "SpanContext":
+        """Enter sync context and start the span."""
+        return self._start_span()
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Exit sync context and end the span."""
+        self._end_span(exc_val)
+
+    def _start_span(self) -> "SpanContext":
+        """Start the Langfuse span."""
+        try:
+            client = get_client()
+
+            # Determine span type based on level
+            span_type_map = {
+                SpanLevel.GENERATION: "generation",
+                SpanLevel.TOOL: "span",  # Tools are regular spans in Langfuse
+            }
+            # Default to span for most levels
+
+            # Build metadata
+            full_metadata = {
+                **self.metadata,
+                **self._span_metadata.to_dict(),
+            }
+
+            # Create the span
+            self._langfuse_span = client.span(
+                name=self.name,
+                metadata=full_metadata,
+            )
+            self._span_id = getattr(self._langfuse_span, "id", None)
+
+            logger.debug(
+                "span_started",
+                name=self.name,
+                level=self.level.value,
+                span_id=self._span_id,
+            )
+
+        except Exception as e:
+            logger.warning("span_start_failed", name=self.name, error=str(e))
+
+        return self
+
+    def _end_span(self, error: Exception | None = None) -> None:
+        """End the Langfuse span."""
+        self._span_metadata.ended_at = datetime.now(UTC)
+
+        if error:
+            self.set_error(error)
+
+        try:
+            if self._langfuse_span:
+                # Update with final metadata including reasoning
+                final_metadata = {
+                    **self.metadata,
+                    **self._span_metadata.to_dict(),
+                }
+                if self._span_metadata.reasoning:
+                    final_metadata["reasoning"] = self._span_metadata.reasoning
+
+                self._langfuse_span.update(
+                    metadata=final_metadata,
+                    end_time=self._span_metadata.ended_at,
+                )
+                self._langfuse_span.end()
+
+            logger.debug(
+                "span_ended",
+                name=self.name,
+                level=self.level.value,
+                has_error=error is not None,
+            )
+
+        except Exception as e:
+            logger.warning("span_end_failed", name=self.name, error=str(e))
+
+
+# ============================================================================
+# Convenience Functions for Span Creation
+# ============================================================================
+
+
+def tool_span(
+    name: str,
+    *,
+    input_data: dict[str, Any] | None = None,
+    parent_span_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> SpanContext:
+    """Create a tool-level span with input/output capture.
+
+    Args:
+        name: Name of the tool.
+        input_data: Input data to capture.
+        parent_span_id: Parent span ID for nesting.
+        metadata: Additional metadata.
+
+    Returns:
+        SpanContext configured for tool execution.
+
+    Example:
+        async with tool_span("get_market_data", input_data={"symbol": "AAPL"}) as span:
+            result = await fetch_market_data("AAPL")
+            span.set_output({"price": 150.0})
+    """
+    ctx = SpanContext(
+        name=name,
+        level=SpanLevel.TOOL,
+        tool_name=name,
+        parent_span_id=parent_span_id,
+        metadata=metadata,
+        capture_input=True,
+        capture_output=True,
+    )
+    if input_data:
+        ctx._span_metadata.input_data = input_data
+    return ctx
+
+
+def agent_span(
+    name: str,
+    *,
+    parent_span_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> SpanContext:
+    """Create an agent-level span.
+
+    Args:
+        name: Name of the agent.
+        parent_span_id: Parent span ID for nesting.
+        metadata: Additional metadata.
+
+    Returns:
+        SpanContext configured for agent execution.
+
+    Example:
+        async with agent_span("research_agent") as span:
+            span.add_reasoning("Starting market research")
+            result = await research()
+    """
+    return SpanContext(
+        name=name,
+        level=SpanLevel.AGENT,
+        agent_name=name,
+        parent_span_id=parent_span_id,
+        metadata=metadata,
+    )
+
+
+def generation_span(
+    name: str,
+    *,
+    model: str | None = None,
+    parent_span_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> SpanContext:
+    """Create a generation-level span for LLM calls.
+
+    Args:
+        name: Name of the generation.
+        model: Model name being used.
+        parent_span_id: Parent span ID for nesting.
+        metadata: Additional metadata.
+
+    Returns:
+        SpanContext configured for LLM generation.
+
+    Example:
+        async with generation_span("analyze_portfolio", model="claude-sonnet") as span:
+            span.add_reasoning("Analyzing risk factors")
+            response = await llm.generate(prompt)
+            span.set_output({"response": response})
+    """
+    return SpanContext(
+        name=name,
+        level=SpanLevel.GENERATION,
+        model=model,
+        parent_span_id=parent_span_id,
+        metadata=metadata,
+    )
+
+
+def preprocessing_span(
+    name: str = "preprocessing",
+    *,
+    parent_span_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> SpanContext:
+    """Create a preprocessing span.
+
+    Args:
+        name: Name of the preprocessing step.
+        parent_span_id: Parent span ID for nesting.
+        metadata: Additional metadata.
+
+    Returns:
+        SpanContext configured for preprocessing.
+
+    Example:
+        async with preprocessing_span() as span:
+            span.set_input({"raw_data": data})
+            processed = clean_and_validate(data)
+            span.set_output({"processed_data": processed})
+    """
+    return SpanContext(
+        name=name,
+        level=SpanLevel.PREPROCESSING,
+        parent_span_id=parent_span_id,
+        metadata=metadata,
+    )
+
+
+def postprocessing_span(
+    name: str = "postprocessing",
+    *,
+    parent_span_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> SpanContext:
+    """Create a postprocessing span.
+
+    Args:
+        name: Name of the postprocessing step.
+        parent_span_id: Parent span ID for nesting.
+        metadata: Additional metadata.
+
+    Returns:
+        SpanContext configured for postprocessing.
+
+    Example:
+        async with postprocessing_span() as span:
+            span.set_input({"raw_result": result})
+            formatted = format_response(result)
+            span.set_output({"formatted": formatted})
+    """
+    return SpanContext(
+        name=name,
+        level=SpanLevel.POSTPROCESSING,
+        parent_span_id=parent_span_id,
+        metadata=metadata,
+    )
+
+
+def planning_span(
+    name: str = "planning",
+    *,
+    parent_span_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> SpanContext:
+    """Create a planning span for LLM reasoning.
+
+    Args:
+        name: Name of the planning step.
+        parent_span_id: Parent span ID for nesting.
+        metadata: Additional metadata.
+
+    Returns:
+        SpanContext configured for planning/reasoning.
+
+    Example:
+        async with planning_span() as span:
+            span.add_reasoning("Evaluating market conditions")
+            span.add_reasoning("Identified 3 risk factors")
+            plan = create_analysis_plan()
+    """
+    return SpanContext(
+        name=name,
+        level=SpanLevel.PLANNING,
+        parent_span_id=parent_span_id,
+        metadata=metadata,
+    )
+
+
+def request_span(
+    name: str,
+    *,
+    session_id: str | None = None,
+    user_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> SpanContext:
+    """Create a request-level span.
+
+    Args:
+        name: Name of the request.
+        session_id: Session identifier.
+        user_id: User identifier.
+        metadata: Additional metadata.
+
+    Returns:
+        SpanContext configured for a request.
+
+    Example:
+        async with request_span("portfolio_analysis", session_id="sess-123") as span:
+            span.set_input({"symbols": ["AAPL", "GOOGL"]})
+            result = await process_request()
+            span.set_output({"status": "completed"})
+    """
+    full_metadata = metadata or {}
+    if session_id:
+        full_metadata["session_id"] = session_id
+    if user_id:
+        full_metadata["user_id"] = user_id
+
+    return SpanContext(
+        name=name,
+        level=SpanLevel.REQUEST,
+        metadata=full_metadata,
+    )
+
+
+# ============================================================================
+# Langfuse Client
+# ============================================================================
 
 
 def get_langfuse_client() -> Langfuse:
