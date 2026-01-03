@@ -46,28 +46,68 @@ logger = structlog.get_logger(__name__)
 class PositionRequest(BaseModel):
     """Request model for a portfolio position."""
 
-    symbol: str = Field(..., description="Stock ticker symbol", min_length=1, max_length=10)
-    quantity: float = Field(..., description="Number of shares", gt=0)
-    cost_basis: float | None = Field(default=None, description="Average cost per share", ge=0)
-    sector: str | None = Field(default=None, description="Sector classification")
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "symbol": "AAPL",
+                    "quantity": 100,
+                    "cost_basis": 150.00,
+                    "sector": "Technology",
+                },
+                {
+                    "symbol": "VTI",
+                    "quantity": 50,
+                },
+            ]
+        }
+    }
+
+    symbol: str = Field(..., description="Stock ticker symbol (e.g., AAPL, GOOGL)", min_length=1, max_length=10)
+    quantity: float = Field(..., description="Number of shares held", gt=0)
+    cost_basis: float | None = Field(default=None, description="Average cost per share in USD", ge=0)
+    sector: str | None = Field(default=None, description="Sector classification (e.g., Technology, Healthcare)")
 
 
 class PortfolioRequest(BaseModel):
     """Request model for portfolio analysis."""
 
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "positions": [
+                        {"symbol": "AAPL", "quantity": 100, "cost_basis": 150.00, "sector": "Technology"},
+                        {"symbol": "GOOGL", "quantity": 50, "cost_basis": 2800.00, "sector": "Technology"},
+                        {"symbol": "JNJ", "quantity": 75, "cost_basis": 160.00, "sector": "Healthcare"},
+                    ],
+                    "user_request": "Analyze portfolio risk and suggest rebalancing to reduce tech concentration",
+                    "total_value": 250000.00,
+                    "cash": 10000.00,
+                    "account_type": "taxable",
+                    "user_id": "user-123",
+                }
+            ]
+        }
+    }
+
     positions: list[PositionRequest] = Field(
-        ..., description="List of portfolio positions", min_length=1
+        ..., description="List of portfolio positions (at least one required)", min_length=1
     )
     user_request: str = Field(
         default="Analyze risk and suggest rebalancing",
-        description="Analysis request",
+        description="Natural language request describing what analysis you want",
         min_length=1,
         max_length=1000,
     )
-    total_value: float | None = Field(default=None, description="Total portfolio value", ge=0)
-    cash: float = Field(default=0.0, description="Cash balance", ge=0)
-    account_type: str = Field(default="taxable", description="Account type")
-    user_id: str | None = Field(default=None, description="Optional user identifier")
+    total_value: float | None = Field(
+        default=None, description="Total portfolio value in USD (calculated from positions if not provided)", ge=0
+    )
+    cash: float = Field(default=0.0, description="Available cash balance in USD", ge=0)
+    account_type: str = Field(
+        default="taxable", description="Account type: taxable, ira, roth_ira, 401k"
+    )
+    user_id: str | None = Field(default=None, description="Optional user identifier for tracking")
 
 
 # ============================================================================
@@ -76,33 +116,56 @@ class PortfolioRequest(BaseModel):
 
 
 class ResearchOutput(BaseModel):
-    """Research agent output."""
+    """Research agent output containing market data and news."""
 
-    market_data: dict[str, Any] = Field(default_factory=dict)
-    news: list[dict[str, Any]] = Field(default_factory=list)
-    summary: str = Field(default="")
-    symbols_researched: list[str] = Field(default_factory=list)
+    market_data: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Market data for each symbol including price, volume, and metrics",
+    )
+    news: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Recent news articles relevant to portfolio holdings",
+    )
+    summary: str = Field(default="", description="AI-generated summary of research findings")
+    symbols_researched: list[str] = Field(
+        default_factory=list, description="List of symbols that were researched"
+    )
 
 
 class AnalysisOutput(BaseModel):
-    """Analysis agent output."""
+    """Analysis agent output containing risk metrics and portfolio analysis."""
 
-    risk_metrics: dict[str, Any] = Field(default_factory=dict)
-    correlations: dict[str, Any] = Field(default_factory=dict)
-    benchmark_comparison: dict[str, Any] = Field(default_factory=dict)
-    recommendations: list[str] = Field(default_factory=list)
-    summary: str = Field(default="")
+    risk_metrics: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Risk metrics including volatility, beta, Sharpe ratio, max drawdown",
+    )
+    correlations: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Correlation matrix between portfolio holdings",
+    )
+    benchmark_comparison: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Comparison of portfolio performance vs benchmarks (S&P 500, etc.)",
+    )
+    recommendations: list[str] = Field(
+        default_factory=list,
+        description="List of AI-generated recommendations based on analysis",
+    )
+    summary: str = Field(default="", description="AI-generated summary of portfolio analysis")
 
 
 class RecommendationOutput(BaseModel):
-    """Recommendation agent output."""
+    """Recommendation agent output containing trade suggestions."""
 
-    trades: list[dict[str, Any]] = Field(default_factory=list)
-    summary: str = Field(default="")
-    total_trades: int = Field(default=0)
-    buy_count: int = Field(default=0)
-    sell_count: int = Field(default=0)
-    hold_count: int = Field(default=0)
+    trades: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="List of recommended trades with symbol, action (BUY/SELL/HOLD), quantity, and rationale",
+    )
+    summary: str = Field(default="", description="AI-generated summary of recommendations")
+    total_trades: int = Field(default=0, description="Total number of trade recommendations")
+    buy_count: int = Field(default=0, description="Number of BUY recommendations")
+    sell_count: int = Field(default=0, description="Number of SELL recommendations")
+    hold_count: int = Field(default=0, description="Number of HOLD recommendations")
 
 
 class AnalysisResponse(BaseModel):
@@ -164,10 +227,60 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     logger.info("application_shutting_down")
 
 
+OPENAPI_TAGS = [
+    {
+        "name": "Analysis",
+        "description": "Portfolio analysis endpoints. Submit portfolios for AI-powered analysis "
+        "including risk assessment, market research, and trade recommendations.",
+    },
+    {
+        "name": "Health",
+        "description": "Health check endpoints for monitoring service status and readiness. "
+        "Compatible with Kubernetes liveness and readiness probes.",
+    },
+]
+
+API_DESCRIPTION = """
+## Overview
+
+The Portfolio Advisor API provides AI-powered portfolio analysis using a multi-agent system.
+Submit your portfolio holdings and receive comprehensive analysis including:
+
+- **Market Research**: Current market data, news, and sentiment analysis
+- **Risk Analysis**: Volatility, correlations, benchmark comparisons
+- **Recommendations**: AI-generated trade suggestions with rationale
+
+## Quick Start
+
+```bash
+curl -X POST http://localhost:8000/analyze \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "positions": [
+      {"symbol": "AAPL", "quantity": 100},
+      {"symbol": "GOOGL", "quantity": 50}
+    ]
+  }'
+```
+
+## Observability
+
+Each analysis request returns a `trace_id` that can be used to:
+- Track the request through the system
+- View detailed traces in Langfuse
+- Debug issues and analyze performance
+
+## Rate Limits
+
+- 100 requests per minute per IP
+- 10 concurrent analysis requests per user
+"""
+
+
 def create_app(
     title: str = "Portfolio Advisor API",
     version: str = "1.0.0",
-    description: str = "Multi-agent portfolio analysis and recommendations",
+    description: str | None = None,
     cors_origins: list[str] | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
@@ -175,7 +288,7 @@ def create_app(
     Args:
         title: API title.
         version: API version.
-        description: API description.
+        description: API description (uses default if not provided).
         cors_origins: Allowed CORS origins.
 
     Returns:
@@ -184,11 +297,20 @@ def create_app(
     app = FastAPI(
         title=title,
         version=version,
-        description=description,
+        description=description or API_DESCRIPTION,
         lifespan=lifespan,
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
+        openapi_tags=OPENAPI_TAGS,
+        contact={
+            "name": "Portfolio Advisor Team",
+            "url": "https://github.com/jpequegn/multi-agent-portfolio-advisor",
+        },
+        license_info={
+            "name": "MIT",
+            "url": "https://opensource.org/licenses/MIT",
+        },
     )
 
     # Configure CORS
