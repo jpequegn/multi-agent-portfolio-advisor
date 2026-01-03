@@ -6,6 +6,30 @@ This module contains:
 - Error handling and recovery
 """
 
+from src.orchestration.errors import (
+    AGENT_FALLBACK_CONFIGS,
+    AgentError,
+    AgentFallbackConfig,
+    ErrorRecoveryManager,
+    FallbackResult,
+    FallbackType,
+    PortfolioAdvisorError,
+    RecoveryAttempt,
+    RecoveryContext,
+    RecoveryError,
+    RetryConfig,
+    RetryStrategy,
+    StateError,
+    ToolError,
+    WorkflowTimeoutError,
+    classify_error,
+    execute_with_timeout,
+    get_agent_fallback_config,
+    get_recovery_manager,
+    is_critical_error,
+    reset_recovery_manager,
+    with_retry,
+)
 from src.orchestration.state import (
     AgentName,
     AnalysisOutputDict,
@@ -43,6 +67,29 @@ from src.orchestration.workflow import (
 )
 
 __all__ = [
+    # Error handling exports
+    "AGENT_FALLBACK_CONFIGS",
+    "AgentError",
+    "AgentFallbackConfig",
+    "ErrorRecoveryManager",
+    "FallbackResult",
+    "FallbackType",
+    "PortfolioAdvisorError",
+    "RecoveryAttempt",
+    "RecoveryContext",
+    "RecoveryError",
+    "RetryConfig",
+    "RetryStrategy",
+    "StateError",
+    "ToolError",
+    "WorkflowTimeoutError",
+    "classify_error",
+    "execute_with_timeout",
+    "get_agent_fallback_config",
+    "get_recovery_manager",
+    "is_critical_error",
+    "reset_recovery_manager",
+    "with_retry",
     # State exports
     "AgentName",
     "AnalysisOutputDict",
