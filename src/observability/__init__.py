@@ -3,12 +3,31 @@
 This module contains:
 - Trace configuration
 - Custom metrics and metadata
-- Cost attribution
+- Cost attribution and tracking
 - Dashboard utilities
 - Nested span hierarchy support
 - Tagging system for categorization
 """
 
+from src.observability.costs import (
+    AlertSeverity,
+    CostAlert,
+    CostAlertManager,
+    CostBreakdown,
+    CostReport,
+    CostThresholds,
+    CostTracker,
+    ModelPricing,
+    ModelProvider,
+    TokenUsage,
+    calculate_llm_cost,
+    estimate_request_cost,
+    format_cost,
+    generate_cost_report,
+    get_cost_tracker,
+    get_model_pricing,
+    reset_cost_tracker,
+)
 from src.observability.metrics import (
     AgentMetadata,
     MetadataBuilder,
@@ -42,6 +61,25 @@ from src.observability.tracing import (
 )
 
 __all__ = [
+    # Cost tracking classes
+    "AlertSeverity",
+    "CostAlert",
+    "CostAlertManager",
+    "CostBreakdown",
+    "CostReport",
+    "CostThresholds",
+    "CostTracker",
+    "ModelPricing",
+    "ModelProvider",
+    "TokenUsage",
+    # Cost functions
+    "calculate_llm_cost",
+    "estimate_request_cost",
+    "format_cost",
+    "generate_cost_report",
+    "get_cost_tracker",
+    "get_model_pricing",
+    "reset_cost_tracker",
     # Metadata classes
     "AgentMetadata",
     "MetadataBuilder",
