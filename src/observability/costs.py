@@ -324,10 +324,11 @@ class CostBreakdown:
 
 
 class AlertSeverity(Enum):
-    """Severity levels for cost alerts."""
+    """Severity levels for cost and performance alerts."""
 
     INFO = "info"
     WARNING = "warning"
+    ERROR = "error"
     CRITICAL = "critical"
 
 

@@ -8,6 +8,7 @@ This module contains:
 - Nested span hierarchy support
 - Tagging system for categorization
 - Failure analysis and alerting
+- Performance monitoring and bottleneck detection
 """
 
 from src.observability.costs import (
@@ -28,18 +29,6 @@ from src.observability.costs import (
     get_cost_tracker,
     get_model_pricing,
     reset_cost_tracker,
-)
-from src.observability.metrics import (
-    AgentMetadata,
-    MetadataBuilder,
-    RequestMetadata,
-    Tag,
-    TagManager,
-    ToolMetadata,
-    collect_tags,
-    create_agent_metadata,
-    create_request_metadata,
-    create_tool_metadata,
 )
 from src.observability.dashboards import (
     AggregationType,
@@ -68,8 +57,8 @@ from src.observability.failures import (
     FailureAlertThresholds,
     FailureAlertType,
     FailureAnalysis,
-    FailureCategory,
     FailureCategorizer,
+    FailureCategory,
     FailurePattern,
     FailureRecord,
     FailureReport,
@@ -80,6 +69,63 @@ from src.observability.failures import (
     get_failure_alert_manager,
     get_failure_tracker,
     reset_failure_tracking,
+)
+from src.observability.metrics import (
+    AgentMetadata,
+    MetadataBuilder,
+    RequestMetadata,
+    Tag,
+    TagManager,
+    ToolMetadata,
+    collect_tags,
+    create_agent_metadata,
+    create_request_metadata,
+    create_tool_metadata,
+)
+from src.observability.performance import (
+    TARGET_AGENT_LATENCY_MS,
+    TARGET_COST_PER_ANALYSIS,
+    TARGET_END_TO_END_LATENCY_MS,
+    TARGET_LLM_LATENCY_MS,
+    TARGET_TOOL_LATENCY_MS,
+    Bottleneck,
+    BottleneckDetector,
+    BottleneckType,
+    LatencyRecord,
+    PercentileCalculator,
+    PercentileStats,
+    PerformanceAlert,
+    PerformanceAlertManager,
+    PerformanceLevel,
+    PerformanceMetrics,
+    PerformanceReport,
+    PerformanceReportGenerator,
+    PerformanceThresholds,
+    PerformanceTracker,
+    format_performance_report,
+    generate_performance_report,
+    get_alert_manager,
+    get_bottleneck_detector,
+    get_performance_tracker,
+    get_report_generator,
+    identify_bottlenecks,
+    reset_performance_tracking,
+)
+from src.observability.replay import (
+    CapturedSpan,
+    CapturedToolResponse,
+    ComparisonEngine,
+    ReplayableRequest,
+    ReplayComparison,
+    ReplayEngine,
+    ReplayMode,
+    ReplayResult,
+    ReplayStatus,
+    ReplayStepResult,
+    ToolMockManager,
+    TraceRetriever,
+    capture_and_replay,
+    create_replay_report,
 )
 from src.observability.tracing import (
     SpanContext,
@@ -99,22 +145,6 @@ from src.observability.tracing import (
     traced_agent,
     traced_generation,
     traced_tool,
-)
-from src.observability.replay import (
-    CapturedSpan,
-    CapturedToolResponse,
-    ComparisonEngine,
-    ReplayableRequest,
-    ReplayComparison,
-    ReplayEngine,
-    ReplayMode,
-    ReplayResult,
-    ReplayStatus,
-    ReplayStepResult,
-    ToolMockManager,
-    TraceRetriever,
-    capture_and_replay,
-    create_replay_report,
 )
 
 __all__ = [
@@ -227,4 +257,35 @@ __all__ = [
     # Replay functions
     "capture_and_replay",
     "create_replay_report",
+    # Performance monitoring targets
+    "TARGET_AGENT_LATENCY_MS",
+    "TARGET_COST_PER_ANALYSIS",
+    "TARGET_END_TO_END_LATENCY_MS",
+    "TARGET_LLM_LATENCY_MS",
+    "TARGET_TOOL_LATENCY_MS",
+    # Performance monitoring enums
+    "BottleneckType",
+    "PerformanceLevel",
+    # Performance monitoring classes
+    "Bottleneck",
+    "BottleneckDetector",
+    "LatencyRecord",
+    "PercentileCalculator",
+    "PercentileStats",
+    "PerformanceAlert",
+    "PerformanceAlertManager",
+    "PerformanceMetrics",
+    "PerformanceReport",
+    "PerformanceReportGenerator",
+    "PerformanceThresholds",
+    "PerformanceTracker",
+    # Performance monitoring functions
+    "format_performance_report",
+    "generate_performance_report",
+    "get_alert_manager",
+    "get_bottleneck_detector",
+    "get_performance_tracker",
+    "get_report_generator",
+    "identify_bottlenecks",
+    "reset_performance_tracking",
 ]
