@@ -7,6 +7,7 @@ This module contains:
 - Dashboard utilities
 - Nested span hierarchy support
 - Tagging system for categorization
+- Failure analysis and alerting
 """
 
 from src.observability.costs import (
@@ -60,6 +61,25 @@ from src.observability.dashboards import (
     get_dashboard_service,
     get_metric_collector,
     reset_dashboard_service,
+)
+from src.observability.failures import (
+    FailureAlert,
+    FailureAlertManager,
+    FailureAlertThresholds,
+    FailureAlertType,
+    FailureAnalysis,
+    FailureCategory,
+    FailureCategorizer,
+    FailurePattern,
+    FailureRecord,
+    FailureReport,
+    FailureSeverity,
+    FailureTracker,
+    PatternDetector,
+    generate_failure_report,
+    get_failure_alert_manager,
+    get_failure_tracker,
+    reset_failure_tracking,
 )
 from src.observability.tracing import (
     SpanContext,
@@ -156,4 +176,23 @@ __all__ = [
     "get_dashboard_service",
     "get_metric_collector",
     "reset_dashboard_service",
+    # Failure analysis classes
+    "FailureAlert",
+    "FailureAlertManager",
+    "FailureAlertThresholds",
+    "FailureAlertType",
+    "FailureAnalysis",
+    "FailureCategory",
+    "FailureCategorizer",
+    "FailurePattern",
+    "FailureRecord",
+    "FailureReport",
+    "FailureSeverity",
+    "FailureTracker",
+    "PatternDetector",
+    # Failure analysis functions
+    "generate_failure_report",
+    "get_failure_alert_manager",
+    "get_failure_tracker",
+    "reset_failure_tracking",
 ]
