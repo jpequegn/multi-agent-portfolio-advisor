@@ -100,6 +100,22 @@ from src.observability.tracing import (
     traced_generation,
     traced_tool,
 )
+from src.observability.replay import (
+    CapturedSpan,
+    CapturedToolResponse,
+    ComparisonEngine,
+    ReplayableRequest,
+    ReplayComparison,
+    ReplayEngine,
+    ReplayMode,
+    ReplayResult,
+    ReplayStatus,
+    ReplayStepResult,
+    ToolMockManager,
+    TraceRetriever,
+    capture_and_replay,
+    create_replay_report,
+)
 
 __all__ = [
     # Cost tracking classes
@@ -195,4 +211,20 @@ __all__ = [
     "get_failure_alert_manager",
     "get_failure_tracker",
     "reset_failure_tracking",
+    # Replay system classes
+    "CapturedSpan",
+    "CapturedToolResponse",
+    "ComparisonEngine",
+    "ReplayableRequest",
+    "ReplayComparison",
+    "ReplayEngine",
+    "ReplayMode",
+    "ReplayResult",
+    "ReplayStatus",
+    "ReplayStepResult",
+    "ToolMockManager",
+    "TraceRetriever",
+    # Replay functions
+    "capture_and_replay",
+    "create_replay_report",
 ]
