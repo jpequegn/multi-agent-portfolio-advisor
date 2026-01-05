@@ -28,7 +28,7 @@ from src.api.health import (
     get_health_service,
     set_health_service,
 )
-from src.observability.tracing import TraceContext, flush_traces
+from src.observability.tracing import TraceContext
 from src.orchestration.state import (
     Portfolio,
     PortfolioState,
@@ -171,6 +171,26 @@ class RecommendationOutput(BaseModel):
     hold_count: int = Field(default=0, description="Number of HOLD recommendations")
 
 
+class ApprovalInfo(BaseModel):
+    """Information about approval status for high-risk recommendations."""
+
+    required: bool = Field(
+        default=False, description="Whether approval is required"
+    )
+    approval_id: str | None = Field(
+        default=None, description="Approval request ID if pending"
+    )
+    status: str | None = Field(
+        default=None, description="Approval status: pending, approved, rejected, expired"
+    )
+    risk_level: str | None = Field(
+        default=None, description="Risk level: low, medium, high, critical"
+    )
+    triggers: list[str] = Field(
+        default_factory=list, description="Reasons that triggered approval requirement"
+    )
+
+
 class AnalysisResponse(BaseModel):
     """Response model for portfolio analysis."""
 
@@ -181,6 +201,9 @@ class AnalysisResponse(BaseModel):
     analysis: AnalysisOutput | None = Field(default=None, description="Analysis results")
     recommendations: RecommendationOutput | None = Field(
         default=None, description="Recommendations"
+    )
+    approval: ApprovalInfo | None = Field(
+        default=None, description="Approval information for high-risk recommendations"
     )
     errors: list[str] = Field(default_factory=list, description="Any errors encountered")
     latency_ms: float = Field(..., description="Total processing time in milliseconds")
@@ -364,6 +387,11 @@ def register_routes(app: FastAPI) -> None:
     Args:
         app: FastAPI application.
     """
+    # Import and include approval routes
+    from src.api.approvals import router as approvals_router
+
+    app.include_router(approvals_router)
+
     # Health endpoints
     @app.get("/health", tags=["Health"])
     async def health() -> dict[str, Any]:
@@ -473,14 +501,20 @@ def register_routes(app: FastAPI) -> None:
                 # Score the trace based on success
                 _score_trace(result_state, latency_ms)
 
+                # Check if recommendations require approval
+                approval_info = await _check_approval_required(
+                    result_state, portfolio.total_value
+                )
+
                 logger.info(
                     "analysis_completed",
                     workflow_id=result_state["workflow_id"],
                     status=result_state.get("status"),
                     latency_ms=round(latency_ms, 2),
+                    requires_approval=approval_info.required if approval_info else False,
                 )
 
-                return _state_to_response(result_state, latency_ms)
+                return _state_to_response(result_state, latency_ms, approval_info)
 
             except Exception as e:
                 latency_ms = (time.monotonic() - start_time) * 1000
@@ -636,16 +670,90 @@ def _record_trace_error(error_message: str) -> None:
 
 
 # ============================================================================
+# Approval Helper Functions
+# ============================================================================
+
+
+async def _check_approval_required(
+    state: PortfolioState,
+    portfolio_value: float,
+) -> ApprovalInfo | None:
+    """Check if recommendations require human approval.
+
+    Args:
+        state: Final workflow state with recommendations.
+        portfolio_value: Total portfolio value.
+
+    Returns:
+        ApprovalInfo if recommendations exist, None otherwise.
+    """
+    recommendation = state.get("recommendation")
+    if not recommendation:
+        return None
+
+    trades = recommendation.get("trades", [])
+    if not trades:
+        return ApprovalInfo(required=False)
+
+    compliance = recommendation.get("compliance", {})
+
+    # Import approval manager
+    from src.approval import get_approval_manager
+
+    manager = get_approval_manager()
+
+    # Evaluate if approval is required
+    evaluation = manager.evaluate_recommendation(
+        trades=trades,
+        portfolio_value=portfolio_value,
+        compliance=compliance,
+        analysis_context=state.get("analysis", {}),
+    )
+
+    if not evaluation.requires_approval:
+        return ApprovalInfo(
+            required=False,
+            risk_level=evaluation.risk_level.value,
+            triggers=[t.value for t in evaluation.triggers],
+        )
+
+    # Create approval request
+    approval_request = await manager.create_approval_request(
+        workflow_id=state["workflow_id"],
+        trace_id=state["trace_id"],
+        trades=trades,
+        portfolio_value=portfolio_value,
+        compliance=compliance,
+        summary=recommendation.get("summary", ""),
+        analysis_context=state.get("analysis", {}),
+        user_id=state.get("user_id"),
+    )
+
+    return ApprovalInfo(
+        required=True,
+        approval_id=approval_request.approval_id,
+        status=approval_request.status.value,
+        risk_level=approval_request.risk_level.value,
+        triggers=[t.value for t in approval_request.triggers],
+    )
+
+
+# ============================================================================
 # Response Helper Functions
 # ============================================================================
 
 
-def _state_to_response(state: PortfolioState, latency_ms: float) -> AnalysisResponse:
+def _state_to_response(
+    state: PortfolioState,
+    latency_ms: float,
+    approval_info: ApprovalInfo | None = None,
+) -> AnalysisResponse:
     """Convert workflow state to API response.
 
     Args:
         state: Workflow state.
         latency_ms: Processing latency.
+        approval_info: Optional approval information.
 
     Returns:
         AnalysisResponse.
@@ -690,6 +798,7 @@ def _state_to_response(state: PortfolioState, latency_ms: float) -> AnalysisResp
         research=research,
         analysis=analysis,
         recommendations=recommendations,
+        approval=approval_info,
         errors=state.get("errors", []),
         latency_ms=round(latency_ms, 2),
         started_at=state.get("started_at", datetime.now(UTC).isoformat()),
