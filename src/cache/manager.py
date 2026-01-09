@@ -33,6 +33,10 @@ class CacheType(Enum):
     NEWS = "news"
     ANALYSIS = "analysis"
     RECOMMENDATION = "recommendation"
+    # New types for Polygon.io integration
+    QUOTE = "quote"
+    DAILY_BARS = "daily_bars"
+    COMPANY_INFO = "company_info"
 
 
 @dataclass
@@ -41,16 +45,22 @@ class CacheConfig:
 
     Attributes:
         market_data_ttl: TTL for market data in seconds (default: 5 min).
-        news_ttl: TTL for news data in seconds (default: 1 hour).
+        news_ttl: TTL for news data in seconds (default: 15 min for Polygon).
         analysis_ttl: TTL for analysis results in seconds (default: 24 hours).
         recommendation_ttl: TTL for recommendations in seconds (default: 1 hour).
+        quote_ttl: TTL for real-time quotes in seconds (default: 1 min).
+        daily_bars_ttl: TTL for daily bars in seconds (default: 1 hour).
+        company_info_ttl: TTL for company info in seconds (default: 24 hours).
         default_ttl: Default TTL for unspecified types (default: 5 min).
     """
 
     market_data_ttl: int = 300  # 5 minutes
-    news_ttl: int = 3600  # 1 hour
+    news_ttl: int = 900  # 15 minutes (optimized for Polygon rate limits)
     analysis_ttl: int = 86400  # 24 hours
     recommendation_ttl: int = 3600  # 1 hour
+    quote_ttl: int = 60  # 1 minute (real-time quotes)
+    daily_bars_ttl: int = 3600  # 1 hour
+    company_info_ttl: int = 86400  # 24 hours
     default_ttl: int = 300  # 5 minutes
 
     def get_ttl(self, cache_type: CacheType) -> int:
@@ -60,6 +70,9 @@ class CacheConfig:
             CacheType.NEWS: self.news_ttl,
             CacheType.ANALYSIS: self.analysis_ttl,
             CacheType.RECOMMENDATION: self.recommendation_ttl,
+            CacheType.QUOTE: self.quote_ttl,
+            CacheType.DAILY_BARS: self.daily_bars_ttl,
+            CacheType.COMPANY_INFO: self.company_info_ttl,
         }
         return ttl_map.get(cache_type, self.default_ttl)
 

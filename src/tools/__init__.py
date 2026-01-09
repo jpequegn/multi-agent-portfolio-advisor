@@ -16,7 +16,6 @@ from src.tools.base import (
     default_registry,
 )
 from src.tools.market_data import (
-    MarketDataCache,
     MarketDataInput,
     MarketDataOutput,
     MarketDataTool,
@@ -61,7 +60,6 @@ __all__ = [
     "CorrelationTool",
     "ExecutionCosts",
     "ExecutionCostTool",
-    "MarketDataCache",
     "MarketDataInput",
     "MarketDataOutput",
     "MarketDataTool",

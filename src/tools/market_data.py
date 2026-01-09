@@ -1,23 +1,24 @@
 """Market Data Tool for fetching real-time stock data.
 
-This module implements the MarketDataTool that fetches market data from
-Yahoo Finance with Redis caching and mock fallback support.
+This module implements the MarketDataTool that fetches market data
+using the DataSourceRouter (Polygon → Yahoo → Cache → Mock fallback chain).
 """
 
 import asyncio
-import json
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-import redis.asyncio as redis
 import structlog
-import yfinance as yf
 from pydantic import Field
 
+from src.cache.manager import CacheManager
+from src.data.models import DataSource
+from src.data.polygon import PolygonClient
+from src.data.router import DataSourceRouter
 from src.tools.base import BaseTool, ToolInput, ToolOutput
 
 if TYPE_CHECKING:
-    from redis.asyncio.client import Redis
+    pass
 
 logger = structlog.get_logger(__name__)
 
@@ -50,11 +51,11 @@ class MarketDataOutput(ToolOutput):
     fifty_two_week_high: float | None = None
     fifty_two_week_low: float | None = None
     timestamp: str
-    source: Literal["real", "mock", "cache"]
+    source: Literal["polygon", "yahoo", "cache", "mock"]
 
 
 # ============================================================================
-# Mock Data
+# Mock Data (used when all fallbacks fail)
 # ============================================================================
 
 
@@ -134,118 +135,21 @@ DEFAULT_MOCK: dict[str, Any] = {
 
 
 # ============================================================================
-# Redis Cache
-# ============================================================================
-
-
-class MarketDataCache:
-    """Redis cache for market data with configurable TTL."""
-
-    DEFAULT_TTL = 300  # 5 minutes
-
-    def __init__(
-        self,
-        redis_url: str = "redis://localhost:6379",
-        ttl: int = DEFAULT_TTL,
-    ) -> None:
-        """Initialize the cache.
-
-        Args:
-            redis_url: Redis connection URL.
-            ttl: Cache TTL in seconds.
-        """
-        self._redis_url = redis_url
-        self._ttl = ttl
-        self._client: "Redis[str] | None" = None  # noqa: UP037
-        self._logger = logger.bind(component="market_data_cache")
-
-    async def _get_client(self) -> "Redis[str]":
-        """Get or create Redis client."""
-        if self._client is None:
-            self._client = redis.from_url(
-                self._redis_url,
-                encoding="utf-8",
-                decode_responses=True,
-            )
-        return self._client
-
-    def _cache_key(self, symbol: str, data_type: str) -> str:
-        """Generate cache key for a symbol."""
-        return f"market_data:{symbol.upper()}:{data_type}"
-
-    async def get(self, symbol: str, data_type: str = "quote") -> MarketDataOutput | None:
-        """Get cached market data.
-
-        Args:
-            symbol: Stock symbol.
-            data_type: Type of data.
-
-        Returns:
-            Cached data or None if not found/expired.
-        """
-        try:
-            client = await self._get_client()
-            key = self._cache_key(symbol, data_type)
-            data = await client.get(key)
-
-            if data:
-                self._logger.debug("cache_hit", symbol=symbol, data_type=data_type)
-                parsed = json.loads(data)
-                return MarketDataOutput(**parsed)
-
-            self._logger.debug("cache_miss", symbol=symbol, data_type=data_type)
-            return None
-
-        except redis.RedisError as e:
-            self._logger.warning("cache_get_error", error=str(e))
-            return None
-
-    async def set(
-        self,
-        symbol: str,
-        data_type: str,
-        data: MarketDataOutput,
-    ) -> bool:
-        """Cache market data.
-
-        Args:
-            symbol: Stock symbol.
-            data_type: Type of data.
-            data: Market data to cache.
-
-        Returns:
-            True if cached successfully.
-        """
-        try:
-            client = await self._get_client()
-            key = self._cache_key(symbol, data_type)
-            await client.setex(key, self._ttl, data.model_dump_json())
-            self._logger.debug("cache_set", symbol=symbol, data_type=data_type, ttl=self._ttl)
-            return True
-
-        except redis.RedisError as e:
-            self._logger.warning("cache_set_error", error=str(e))
-            return False
-
-    async def close(self) -> None:
-        """Close Redis connection."""
-        if self._client:
-            await self._client.close()
-            self._client = None
-
-
-# ============================================================================
 # Market Data Tool
 # ============================================================================
 
 
 class MarketDataTool(BaseTool[MarketDataInput, MarketDataOutput]):
-    """Tool for fetching market data from Yahoo Finance.
+    """Tool for fetching market data with intelligent fallback.
+
+    Uses the DataSourceRouter to fetch data through the fallback chain:
+    Polygon.io → Yahoo Finance → Cache → Mock
 
     Features:
-    - Real-time data via yfinance
+    - Real-time data via Polygon.io (primary) or Yahoo Finance (fallback)
+    - Rate-limited queue for Polygon's 5 req/min free tier
     - Redis caching with configurable TTL
-    - Mock data fallback for testing/resilience
+    - Automatic fallback through the chain
     - Execution tracing
     """
 
@@ -259,20 +163,30 @@ class MarketDataTool(BaseTool[MarketDataInput, MarketDataOutput]):
         self,
         use_mock: bool | None = None,
         fallback_to_mock: bool | None = None,
-        cache: MarketDataCache | None = None,
-        use_cache: bool = True,
+        router: DataSourceRouter | None = None,
+        polygon_client: PolygonClient | None = None,
+        cache_manager: CacheManager | None = None,
     ) -> None:
         """Initialize the MarketDataTool.
 
         Args:
             use_mock: Whether to use mock data instead of real API.
             fallback_to_mock: Whether to fall back to mock on API failure.
-            cache: Optional custom cache instance.
-            use_cache: Whether to use caching (default True).
+            router: Optional DataSourceRouter instance. If not provided,
+                creates one with the polygon_client and cache_manager.
+            polygon_client: Optional PolygonClient for Polygon.io API.
+            cache_manager: Optional CacheManager for Redis caching.
         """
         super().__init__(use_mock=use_mock, fallback_to_mock=fallback_to_mock)
-        self._cache = cache
-        self._use_cache = use_cache
+
+        # Create or use provided router
+        if router:
+            self._router = router
+        else:
+            self._router = DataSourceRouter(
+                polygon=polygon_client or PolygonClient(),
+                cache=cache_manager,
+            )
 
     @property
     def input_schema(self) -> type[MarketDataInput]:
@@ -282,102 +196,55 @@ class MarketDataTool(BaseTool[MarketDataInput, MarketDataOutput]):
     def output_schema(self) -> type[MarketDataOutput]:
         return MarketDataOutput
 
+    @property
+    def router(self) -> DataSourceRouter:
+        """Get the underlying data source router."""
+        return self._router
+
     async def _execute_real(self, input_data: MarketDataInput) -> MarketDataOutput:
-        """Fetch real market data from Yahoo Finance.
+        """Fetch market data through the DataSourceRouter.
+
+        The router handles the fallback chain:
+        Polygon → Yahoo → Cache → Mock
 
         Args:
             input_data: Validated input with symbol and data_type.
 
         Returns:
             Market data output.
-
-        Raises:
-            ValueError: If the symbol is invalid or data unavailable.
         """
         symbol = input_data.symbol.upper()
-
-        # Check cache first
-        if self._use_cache and self._cache:
-            cached = await self._cache.get(symbol, input_data.data_type)
-            if cached:
-                return cached
-
-        # Fetch from yfinance (runs sync in thread pool)
         self._logger.info("fetching_market_data", symbol=symbol)
-        ticker_data = await asyncio.to_thread(self._fetch_yfinance_data, symbol)
 
-        if ticker_data is None:
+        # Use router to get quote (handles all fallbacks)
+        result = await self._router.get_quote(symbol)
+
+        if result.quote is None:
+            # This shouldn't happen as mock is the last fallback,
+            # but handle it gracefully
             raise ValueError(f"Could not fetch data for symbol: {symbol}")
 
-        output = MarketDataOutput(
+        # Map DataSource enum to string for backward compatibility
+        source_map = {
+            DataSource.POLYGON: "polygon",
+            DataSource.YAHOO: "yahoo",
+            DataSource.CACHE: "cache",
+            DataSource.MOCK: "mock",
+        }
+
+        return MarketDataOutput(
             symbol=symbol,
-            price=ticker_data["price"],
-            change_percent=ticker_data["change_percent"],
-            volume=ticker_data["volume"],
-            market_cap=ticker_data.get("market_cap"),
-            pe_ratio=ticker_data.get("pe_ratio"),
-            dividend_yield=ticker_data.get("dividend_yield"),
-            fifty_two_week_high=ticker_data.get("fifty_two_week_high"),
-            fifty_two_week_low=ticker_data.get("fifty_two_week_low"),
-            timestamp=datetime.now().isoformat(),
-            source="real",
+            price=result.quote.price,
+            change_percent=result.quote.change_percent,
+            volume=result.quote.volume,
+            market_cap=None,  # Quote doesn't include market_cap
+            pe_ratio=None,  # Quote doesn't include pe_ratio
+            dividend_yield=None,  # Quote doesn't include dividend_yield
+            fifty_two_week_high=result.quote.high,
+            fifty_two_week_low=result.quote.low,
+            timestamp=result.quote.timestamp.isoformat(),
+            source=source_map.get(result.source, "mock"),
         )
-
-        # Cache the result
-        if self._use_cache and self._cache:
-            await self._cache.set(symbol, input_data.data_type, output)
-
-        return output
-
-    def _fetch_yfinance_data(self, symbol: str) -> dict[str, Any] | None:
-        """Fetch data from yfinance (sync method).
-
-        Args:
-            symbol: Stock ticker symbol.
-
-        Returns:
-            Dict with market data or None if unavailable.
-        """
-        try:
-            ticker = yf.Ticker(symbol)
-            info = ticker.info
-
-            # Check if we got valid data
-            if not info or info.get("regularMarketPrice") is None:
-                self._logger.warning("invalid_ticker_data", symbol=symbol)
-                return None
-
-            # Extract current price
-            price = info.get("regularMarketPrice") or info.get("currentPrice", 0.0)
-
-            # Calculate change percent
-            previous_close = info.get("previousClose", price)
-            if previous_close and previous_close > 0:
-                change_percent = ((price - previous_close) / previous_close) * 100
-            else:
-                change_percent = 0.0
-
-            return {
-                "price": float(price),
-                "change_percent": round(change_percent, 2),
-                "volume": int(info.get("regularMarketVolume", 0)),
-                "market_cap": info.get("marketCap"),
-                "pe_ratio": info.get("trailingPE"),
-                "dividend_yield": self._to_percent(info.get("dividendYield")),
-                "fifty_two_week_high": info.get("fiftyTwoWeekHigh"),
-                "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
-            }
-
-        except Exception as e:
-            self._logger.error("yfinance_fetch_error", symbol=symbol, error=str(e))
-            return None
-
-    @staticmethod
-    def _to_percent(value: float | None) -> float | None:
-        """Convert decimal to percentage (e.g., 0.005 -> 0.5)."""
-        if value is None:
-            return None
-        return round(value * 100, 2)
 
     async def _execute_mock(self, input_data: MarketDataInput) -> MarketDataOutput:
         """Return mock market data.
@@ -404,3 +271,8 @@ class MarketDataTool(BaseTool[MarketDataInput, MarketDataOutput]):
             timestamp=datetime.now().isoformat(),
             source="mock",
         )
+
+    async def close(self) -> None:
+        """Close underlying connections."""
+        if self._router:
+            await self._router.close()

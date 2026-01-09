@@ -1,7 +1,8 @@
 """Research Agent for gathering market data and information.
 
 This module implements the ResearchAgent that collects market data,
-news, and other financial information for portfolio analysis.
+news, and other financial information for portfolio analysis using
+the Polygon.io integration with intelligent fallback chain.
 """
 
 from typing import Any
@@ -10,8 +11,13 @@ import structlog
 from pydantic import BaseModel, Field
 
 from src.agents.base import AgentState, BaseAgent
+from src.cache.manager import CacheManager
+from src.data.polygon import PolygonClient
+from src.data.router import DataSourceRouter
 from src.observability.tracing import traced_agent
-from src.tools.base import BaseTool, ToolInput, ToolOutput, ToolRegistry
+from src.tools.base import BaseTool, ToolRegistry
+from src.tools.market_data import MarketDataTool
+from src.tools.news_search import NewsSearchTool
 
 logger = structlog.get_logger(__name__)
 
@@ -42,6 +48,7 @@ class SymbolData(BaseModel):
     market_cap: float | None = None
     pe_ratio: float | None = None
     dividend_yield: float | None = None
+    data_source: str | None = None  # polygon, yahoo, cache, mock
 
 
 class ResearchOutput(BaseModel):
@@ -59,136 +66,6 @@ class ResearchOutput(BaseModel):
 
 
 # ============================================================================
-# Placeholder Tool Inputs/Outputs (to be replaced by actual tool implementations)
-# ============================================================================
-
-
-class MarketDataInput(ToolInput):
-    """Input for market data tool."""
-
-    symbol: str
-
-
-class MarketDataOutput(ToolOutput):
-    """Output from market data tool."""
-
-    symbol: str
-    price: float
-    change_percent: float
-    volume: int
-    market_cap: float | None = None
-    pe_ratio: float | None = None
-    dividend_yield: float | None = None
-
-
-class NewsSearchInput(ToolInput):
-    """Input for news search tool."""
-
-    query: str
-    max_results: int = 5
-
-
-class NewsSearchOutput(ToolOutput):
-    """Output from news search tool."""
-
-    items: list[NewsItem] = Field(default_factory=list)
-
-
-# ============================================================================
-# Placeholder Tools (to be replaced by actual implementations in #10 and #11)
-# ============================================================================
-
-
-class PlaceholderMarketDataTool(BaseTool[MarketDataInput, MarketDataOutput]):
-    """Placeholder market data tool for testing.
-
-    Will be replaced by actual implementation in issue #10.
-    """
-
-    name = "get_market_data"
-    description = "Fetches current market data for a stock symbol including price, volume, and key metrics"
-
-    @property
-    def input_schema(self) -> type[MarketDataInput]:
-        return MarketDataInput
-
-    @property
-    def output_schema(self) -> type[MarketDataOutput]:
-        return MarketDataOutput
-
-    async def _execute_real(self, input_data: MarketDataInput) -> MarketDataOutput:
-        """Real implementation - placeholder raises to trigger mock fallback."""
-        raise NotImplementedError("Real market data API not yet implemented")
-
-    async def _execute_mock(self, input_data: MarketDataInput) -> MarketDataOutput:
-        """Mock implementation with sample data."""
-        # Mock data based on symbol
-        mock_data = {
-            "AAPL": {"price": 178.50, "change": 1.25, "volume": 52_000_000, "cap": 2.8e12, "pe": 28.5},
-            "GOOGL": {"price": 141.80, "change": -0.45, "volume": 21_000_000, "cap": 1.8e12, "pe": 25.2},
-            "MSFT": {"price": 378.90, "change": 0.82, "volume": 18_000_000, "cap": 2.9e12, "pe": 35.1},
-        }
-
-        data = mock_data.get(
-            input_data.symbol.upper(),
-            {"price": 100.0, "change": 0.0, "volume": 1_000_000, "cap": 1e9, "pe": 20.0},
-        )
-
-        return MarketDataOutput(
-            symbol=input_data.symbol.upper(),
-            price=data["price"],
-            change_percent=data["change"],
-            volume=int(data["volume"]),
-            market_cap=data["cap"],
-            pe_ratio=data["pe"],
-        )
-
-
-class PlaceholderNewsSearchTool(BaseTool[NewsSearchInput, NewsSearchOutput]):
-    """Placeholder news search tool for testing.
-
-    Will be replaced by actual implementation in issue #11.
-    """
-
-    name = "search_news"
-    description = "Searches for recent financial news related to a query or stock symbol"
-
-    @property
-    def input_schema(self) -> type[NewsSearchInput]:
-        return NewsSearchInput
-
-    @property
-    def output_schema(self) -> type[NewsSearchOutput]:
-        return NewsSearchOutput
-
-    async def _execute_real(self, input_data: NewsSearchInput) -> NewsSearchOutput:
-        """Real implementation - placeholder raises to trigger mock fallback."""
-        raise NotImplementedError("Real news search API not yet implemented")
-
-    async def _execute_mock(self, input_data: NewsSearchInput) -> NewsSearchOutput:
-        """Mock implementation with sample news."""
-        items = [
-            NewsItem(
-                title=f"Market Update: {input_data.query} shows strong momentum",
-                source="Financial Times",
-                url="https://ft.com/example",
-                summary=f"Analysis of recent {input_data.query} performance and outlook.",
-                sentiment="positive",
-                published_at="2024-01-15T10:30:00Z",
-            ),
-            NewsItem(
-                title=f"Analyst Report: {input_data.query} earnings preview",
-                source="Bloomberg",
-                url="https://bloomberg.com/example",
-                summary="Upcoming earnings expectations and key metrics to watch.",
-                sentiment="neutral",
-                published_at="2024-01-15T09:15:00Z",
-            ),
-        ]
-        return NewsSearchOutput(items=items[: input_data.max_results])
-
-
-# ============================================================================
 # Research Agent
 # ============================================================================
 
@@ -199,6 +76,12 @@ class ResearchAgent(BaseAgent):
     The Research Agent is the first step in the portfolio analysis workflow.
     It collects market data, news, and other relevant information for the
     symbols in the portfolio.
+
+    Data sources (in fallback order):
+    1. Polygon.io - Primary source for real-time market data
+    2. Yahoo Finance - Fallback when Polygon is unavailable
+    3. Redis Cache - Fallback to cached data when APIs fail
+    4. Mock Data - Last resort for testing/resilience
 
     Tools:
         - get_market_data: Fetches current market data for symbols
@@ -211,29 +94,52 @@ class ResearchAgent(BaseAgent):
     def __init__(
         self,
         tool_registry: ToolRegistry | None = None,
-        use_mock_tools: bool = True,
+        use_mock_tools: bool = False,
+        polygon_client: PolygonClient | None = None,
+        cache_manager: CacheManager | None = None,
+        data_router: DataSourceRouter | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the Research Agent.
 
         Args:
             tool_registry: Optional custom tool registry. If not provided,
-                creates a new one with placeholder tools.
-            use_mock_tools: Whether to use mock mode for tools.
+                creates a new one with real tools.
+            use_mock_tools: Whether to use mock mode for tools (default False).
+            polygon_client: Optional Polygon.io client.
+            cache_manager: Optional Redis cache manager.
+            data_router: Optional DataSourceRouter (shared across tools).
             **kwargs: Additional arguments passed to BaseAgent.
         """
         super().__init__(**kwargs)
+
+        # Create shared data router if not provided
+        if data_router is None:
+            data_router = DataSourceRouter(
+                polygon=polygon_client or PolygonClient(),
+                cache=cache_manager,
+            )
+
+        self._data_router = data_router
 
         # Set up tool registry
         if tool_registry is not None:
             self._tool_registry = tool_registry
         else:
             self._tool_registry = ToolRegistry()
+
+            # Register real tools with shared router
             self._tool_registry.register(
-                PlaceholderMarketDataTool(use_mock=use_mock_tools)
+                MarketDataTool(
+                    use_mock=use_mock_tools,
+                    router=data_router,
+                )
             )
             self._tool_registry.register(
-                PlaceholderNewsSearchTool(use_mock=use_mock_tools)
+                NewsSearchTool(
+                    use_mock=use_mock_tools,
+                    router=data_router,
+                )
             )
 
     @property
@@ -255,16 +161,19 @@ Your role is to:
 
 Available tools:
 - get_market_data: Fetches current price, volume, and key metrics for a stock symbol
+  (Uses Polygon.io as primary source with Yahoo Finance fallback)
 - search_news: Searches for recent financial news related to a query
+  (Uses Polygon.io as primary source with Google News fallback)
 
 Guidelines:
 - Always gather market data for all requested symbols
 - Search for news related to the portfolio or specific symbols
 - Report any errors or missing data clearly
+- Note the data source for transparency (polygon, yahoo, cache, mock)
 - Provide a brief summary of your findings
 
 Output your findings in a structured format with:
-- Market data for each symbol
+- Market data for each symbol (with source attribution)
 - Relevant news items
 - A summary of key observations
 - List of data sources used"""
@@ -273,6 +182,11 @@ Output your findings in a structured format with:
     def tools(self) -> list[dict[str, Any]]:
         """Return tools in Anthropic format."""
         return self._tool_registry.to_anthropic_tools()
+
+    @property
+    def data_router(self) -> DataSourceRouter:
+        """Get the data source router for direct access."""
+        return self._data_router
 
     def get_tool(self, name: str) -> BaseTool[Any, Any]:
         """Get a tool by name from the registry.
@@ -322,9 +236,14 @@ Output your findings in a structured format with:
                     market_cap=result.market_cap,
                     pe_ratio=result.pe_ratio,
                     dividend_yield=result.dividend_yield,
+                    data_source=result.source,
                 )
-                output.sources.append(f"Market data for {symbol}")
-                self._logger.debug("market_data_collected", symbol=symbol)
+                output.sources.append(f"Market data for {symbol} ({result.source})")
+                self._logger.debug(
+                    "market_data_collected",
+                    symbol=symbol,
+                    source=result.source,
+                )
             except Exception as e:
                 error_msg = f"Failed to get market data for {symbol}: {e}"
                 output.errors.append(error_msg)
@@ -335,9 +254,26 @@ Output your findings in a structured format with:
         try:
             # Search for portfolio-related news
             query = " ".join(symbols[:3])  # Use first 3 symbols as query
-            news_result = await news_tool.execute({"query": query, "max_results": 5})
-            output.news_items = news_result.items
-            output.sources.append(f"News search for: {query}")
+            news_result = await news_tool.execute({
+                "query": query,
+                "symbols": symbols[:3],
+                "max_results": 5,
+            })
+
+            # Convert news items to our format
+            for item in news_result.items:
+                output.news_items.append(
+                    NewsItem(
+                        title=item.title,
+                        source=item.source,
+                        url=item.url,
+                        summary=item.summary,
+                        sentiment=item.sentiment,
+                        published_at=item.published_at,
+                    )
+                )
+
+            output.sources.append(f"News search for: {query} ({news_result.source})")
             self._logger.debug("news_collected", item_count=len(news_result.items))
         except Exception as e:
             error_msg = f"Failed to search news: {e}"
@@ -377,6 +313,14 @@ Output your findings in a structured format with:
         """
         parts = []
 
+        # Data source summary
+        sources_used = set()
+        for symbol_data in output.market_data.values():
+            if symbol_data.data_source:
+                sources_used.add(symbol_data.data_source)
+        if sources_used:
+            parts.append(f"Data sources: {', '.join(sorted(sources_used))}")
+
         # Market data summary
         if output.market_data:
             gainers = []
@@ -409,3 +353,8 @@ Output your findings in a structured format with:
             parts.append(f"Encountered {len(output.errors)} error(s) during research")
 
         return ". ".join(parts) if parts else "Research completed successfully."
+
+    async def close(self) -> None:
+        """Close underlying connections."""
+        if self._data_router:
+            await self._data_router.close()
