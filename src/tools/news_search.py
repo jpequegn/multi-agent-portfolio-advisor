@@ -1,7 +1,7 @@
 """News Search Tool for fetching financial news.
 
-This module implements the NewsSearchTool that fetches news from
-Google News RSS with mock fallback support.
+This module implements the NewsSearchTool that fetches news using the
+DataSourceRouter (Polygon → Google News → Cache → Mock fallback chain).
 """
 
 import hashlib
@@ -9,7 +9,7 @@ import random
 import re
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import quote
 
 import httpx
@@ -17,6 +17,9 @@ import structlog
 from pydantic import Field
 
 from src.tools.base import BaseTool, ToolInput, ToolOutput
+
+if TYPE_CHECKING:
+    from src.data.router import DataSourceRouter
 
 logger = structlog.get_logger(__name__)
 
@@ -475,7 +478,8 @@ class NewsSearchTool(BaseTool[NewsSearchInput, NewsSearchOutput]):
     """Tool for searching financial news.
 
     Features:
-    - Real-time news via Google News RSS
+    - Real-time news via Polygon.io (primary) or Google News RSS (fallback)
+    - Rate-limited queue for Polygon's 5 req/min free tier
     - Mock news generator for testing
     - Relevance scoring based on query and symbols
     - Date filtering
@@ -495,16 +499,19 @@ class NewsSearchTool(BaseTool[NewsSearchInput, NewsSearchOutput]):
         use_mock: bool | None = None,
         fallback_to_mock: bool | None = None,
         http_client: httpx.AsyncClient | None = None,
+        router: "DataSourceRouter | None" = None,
     ) -> None:
         """Initialize the NewsSearchTool.
 
         Args:
             use_mock: Whether to use mock data instead of real API.
             fallback_to_mock: Whether to fall back to mock on API failure.
-            http_client: Optional custom HTTP client.
+            http_client: Optional custom HTTP client for Google News fallback.
+            router: Optional DataSourceRouter for Polygon.io integration.
         """
         super().__init__(use_mock=use_mock, fallback_to_mock=fallback_to_mock)
         self._http_client = http_client
+        self._router = router
 
     @property
     def input_schema(self) -> type[NewsSearchInput]:
@@ -521,7 +528,75 @@ class NewsSearchTool(BaseTool[NewsSearchInput, NewsSearchOutput]):
         return self._http_client
 
     async def _execute_real(self, input_data: NewsSearchInput) -> NewsSearchOutput:
-        """Fetch real news from Google News RSS.
+        """Fetch real news with Polygon → Google News fallback chain.
+
+        Args:
+            input_data: Validated input with query and filters.
+
+        Returns:
+            News search output.
+
+        Raises:
+            ValueError: If all sources fail.
+        """
+        # Build search query
+        search_terms = [input_data.query]
+        if input_data.symbols:
+            search_terms.extend(input_data.symbols)
+        full_query = " ".join(search_terms)
+
+        self._logger.info("searching_news", query=full_query)
+
+        # Try Polygon first if router is available
+        if self._router:
+            try:
+                # Use first symbol if available, otherwise None for market news
+                symbol = input_data.symbols[0] if input_data.symbols else None
+                result = await self._router.search_news(symbol, input_data.max_results)
+
+                if result.news:
+                    # Convert Polygon news to our format
+                    items = []
+                    for article in result.news:
+                        # Calculate relevance
+                        relevance = calculate_relevance_score(
+                            article.title,
+                            article.summary or "",
+                            input_data.query,
+                            input_data.symbols,
+                        )
+
+                        items.append(
+                            NewsItem(
+                                title=article.title,
+                                summary=article.summary or article.title,
+                                source=article.publisher,
+                                url=article.url,
+                                published_at=article.published_at.isoformat(),
+                                relevance_score=relevance,
+                                sentiment=article.sentiment,
+                            )
+                        )
+
+                    # Sort by relevance
+                    items.sort(key=lambda x: x.relevance_score, reverse=True)
+
+                    return NewsSearchOutput(
+                        query=input_data.query,
+                        items=items[: input_data.max_results],
+                        total_found=len(items),
+                        source="real",
+                    )
+
+            except Exception as e:
+                self._logger.warning("polygon_news_failed", error=str(e))
+                # Fall through to Google News
+
+        # Fallback to Google News RSS
+        return await self._fetch_google_news(input_data)
+
+    async def _fetch_google_news(self, input_data: NewsSearchInput) -> NewsSearchOutput:
+        """Fetch news from Google News RSS.
 
         Args:
             input_data: Validated input with query and filters.
@@ -532,15 +607,11 @@ class NewsSearchTool(BaseTool[NewsSearchInput, NewsSearchOutput]):
         Raises:
             ValueError: If the search fails.
         """
-        # Build search query
         search_terms = [input_data.query]
         if input_data.symbols:
             search_terms.extend(input_data.symbols)
         full_query = " ".join(search_terms)
 
-        self._logger.info("searching_news", query=full_query)
-
-        # Fetch from Google News RSS
         client = await self._get_http_client()
         url = f"{self.GOOGLE_NEWS_RSS_URL}?q={quote(full_query)}&hl=en-US&gl=US&ceid=US:en"
 

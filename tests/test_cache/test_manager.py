@@ -46,9 +46,12 @@ class TestCacheConfig:
         """Test default configuration values."""
         config = CacheConfig()
         assert config.market_data_ttl == 300  # 5 minutes
-        assert config.news_ttl == 3600  # 1 hour
+        assert config.news_ttl == 900  # 15 minutes (optimized for Polygon)
         assert config.analysis_ttl == 86400  # 24 hours
         assert config.recommendation_ttl == 3600  # 1 hour
+        assert config.quote_ttl == 60  # 1 minute (real-time quotes)
+        assert config.daily_bars_ttl == 3600  # 1 hour
+        assert config.company_info_ttl == 86400  # 24 hours
         assert config.default_ttl == 300  # 5 minutes
 
     def test_custom_values(self) -> None:
