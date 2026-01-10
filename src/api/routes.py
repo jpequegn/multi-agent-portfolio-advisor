@@ -260,6 +260,11 @@ OPENAPI_TAGS = [
         "including risk assessment, market research, and trade recommendations.",
     },
     {
+        "name": "Webhooks",
+        "description": "Webhook management endpoints. Register webhooks to receive notifications "
+        "for analysis events, approval workflows, alerts, and system events.",
+    },
+    {
         "name": "Health",
         "description": "Health check endpoints for monitoring service status and readiness. "
         "Compatible with Kubernetes liveness and readiness probes.",
@@ -396,6 +401,11 @@ def register_routes(app: FastAPI) -> None:
     from src.api.streaming import router as streaming_router
 
     app.include_router(streaming_router)
+
+    # Import and include webhook routes
+    from src.api.webhooks import router as webhooks_router
+
+    app.include_router(webhooks_router)
 
     # Health endpoints
     @app.get("/health", tags=["Health"])
