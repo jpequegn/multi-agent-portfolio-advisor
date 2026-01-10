@@ -142,6 +142,8 @@ class TestBaseAgent:
         mock_response.stop_reason = "end_turn"
         mock_response.usage.input_tokens = 10
         mock_response.usage.output_tokens = 20
+        mock_response.usage.cache_creation_input_tokens = 0
+        mock_response.usage.cache_read_input_tokens = 0
         mock_content = MagicMock()
         mock_content.model_dump.return_value = {"type": "text", "text": "Hello"}
         mock_response.content = [mock_content]
@@ -149,7 +151,8 @@ class TestBaseAgent:
         mock_llm = MagicMock()
         mock_llm.messages.create.return_value = mock_response
 
-        agent = ConcreteAgent(llm=mock_llm)
+        # Disable caching to test standard flow
+        agent = ConcreteAgent(llm=mock_llm, enable_cache=False)
         messages: list[dict[str, Any]] = [{"role": "user", "content": "Hi"}]
 
         result = await agent._call_llm(messages)
@@ -173,6 +176,8 @@ class TestBaseAgent:
         mock_response.stop_reason = "tool_use"
         mock_response.usage.input_tokens = 15
         mock_response.usage.output_tokens = 25
+        mock_response.usage.cache_creation_input_tokens = 0
+        mock_response.usage.cache_read_input_tokens = 0
         mock_content = MagicMock()
         mock_content.model_dump.return_value = {"type": "tool_use", "name": "test_tool"}
         mock_response.content = [mock_content]
@@ -180,7 +185,8 @@ class TestBaseAgent:
         mock_llm = MagicMock()
         mock_llm.messages.create.return_value = mock_response
 
-        agent = ConcreteAgent(llm=mock_llm)
+        # Disable caching to test standard flow
+        agent = ConcreteAgent(llm=mock_llm, enable_cache=False)
         messages: list[dict[str, Any]] = [{"role": "user", "content": "Use a tool"}]
         tools: list[dict[str, Any]] = [{"name": "test_tool", "description": "A test tool"}]
 
@@ -194,3 +200,60 @@ class TestBaseAgent:
             messages=messages,
             tools=tools,
         )
+
+    @pytest.mark.asyncio
+    async def test_call_llm_with_caching_enabled(self) -> None:
+        """Test _call_llm uses cached prompt structure when caching is enabled."""
+        mock_response = MagicMock()
+        mock_response.stop_reason = "end_turn"
+        mock_response.usage.input_tokens = 10
+        mock_response.usage.output_tokens = 20
+        mock_response.usage.cache_creation_input_tokens = 100
+        mock_response.usage.cache_read_input_tokens = 0
+        mock_content = MagicMock()
+        mock_content.model_dump.return_value = {"type": "text", "text": "Hello"}
+        mock_response.content = [mock_content]
+
+        mock_llm = MagicMock()
+        mock_llm.messages.create.return_value = mock_response
+
+        agent = ConcreteAgent(llm=mock_llm, enable_cache=True)
+        messages: list[dict[str, Any]] = [{"role": "user", "content": "Hi"}]
+
+        result = await agent._call_llm(messages)
+
+        assert result["role"] == "assistant"
+        assert result["stop_reason"] == "end_turn"
+        assert agent.last_cache_metrics is not None
+        assert agent.last_cache_metrics.cache_creation_tokens == 100
+
+        # With caching enabled, system should be a list of blocks, not a string
+        call_args = mock_llm.messages.create.call_args
+        assert isinstance(call_args.kwargs["system"], list)
+        assert "cache_control" in call_args.kwargs["system"][0]
+
+    @pytest.mark.asyncio
+    async def test_call_llm_cache_hit_metrics(self) -> None:
+        """Test that cache hit metrics are properly tracked."""
+        mock_response = MagicMock()
+        mock_response.stop_reason = "end_turn"
+        mock_response.usage.input_tokens = 10
+        mock_response.usage.output_tokens = 20
+        mock_response.usage.cache_creation_input_tokens = 0
+        mock_response.usage.cache_read_input_tokens = 500  # Cache hit
+        mock_content = MagicMock()
+        mock_content.model_dump.return_value = {"type": "text", "text": "Cached response"}
+        mock_response.content = [mock_content]
+
+        mock_llm = MagicMock()
+        mock_llm.messages.create.return_value = mock_response
+
+        agent = ConcreteAgent(llm=mock_llm, enable_cache=True)
+        messages: list[dict[str, Any]] = [{"role": "user", "content": "Hi"}]
+
+        await agent._call_llm(messages)
+
+        assert agent.last_cache_metrics is not None
+        assert agent.last_cache_metrics.is_cache_hit is True
+        assert agent.last_cache_metrics.cache_read_tokens == 500
+        assert agent.last_cache_metrics.cache_hit_rate > 0.9  # 500/(500+10) ≈ 98%

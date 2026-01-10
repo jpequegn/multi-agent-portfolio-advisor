@@ -192,6 +192,9 @@ class PortfolioState(TypedDict, total=False):
     # Context for passing additional data
     context: dict[str, Any]
 
+    # Cache metrics (if prompt caching is enabled)
+    cache_metrics: dict[str, Any] | None
+
 
 # ============================================================================
 # State Factory and Helpers
@@ -244,6 +247,7 @@ def create_initial_state(
         "messages": [],
         "errors": [],
         "context": {},
+        "cache_metrics": None,
     }
 
     logger.info(
