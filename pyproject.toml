@@ -25,6 +25,10 @@ dependencies = [
     "structlog>=24.0.0",
     # Market Data
     "yfinance>=0.2.0",
+    # Memory & Embeddings
+    "sentence-transformers>=3.0.0",
+    "numpy>=1.26.0",
+    "aiosqlite>=0.20.0",
 ]
 
 [project.optional-dependencies]
@@ -84,6 +88,8 @@ module = [
     "langgraph.*",
     "langfuse.*",
     "yfinance.*",
+    "sentence_transformers.*",
+    "aiosqlite.*",
 ]
 ignore_missing_imports = true
 
