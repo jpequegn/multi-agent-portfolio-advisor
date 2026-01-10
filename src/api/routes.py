@@ -392,6 +392,11 @@ def register_routes(app: FastAPI) -> None:
 
     app.include_router(approvals_router)
 
+    # Import and include streaming routes
+    from src.api.streaming import router as streaming_router
+
+    app.include_router(streaming_router)
+
     # Health endpoints
     @app.get("/health", tags=["Health"])
     async def health() -> dict[str, Any]:

@@ -4,15 +4,15 @@ This module defines the main workflow that orchestrates all agents
 to analyze portfolios and generate recommendations.
 """
 
+import time
 from typing import Any, Literal, cast
 
 import structlog
+from langfuse import observe
 from langgraph.graph import END, StateGraph
 
 from src.agents import AnalysisAgent, RecommendationAgent, ResearchAgent
 from src.agents.base import AgentState
-from langfuse import observe
-
 from src.observability.tracing import traced_agent
 from src.orchestration.state import (
     AgentName,
@@ -23,6 +23,7 @@ from src.orchestration.state import (
     update_state_for_agent,
     update_state_with_result,
 )
+from src.streaming import get_emitter_from_state
 
 logger = structlog.get_logger(__name__)
 
@@ -44,12 +45,26 @@ async def research_node(state: PortfolioState) -> PortfolioState:
     Returns:
         Updated state with research results.
     """
+    start_time = time.monotonic()
+    emitter = get_emitter_from_state(state)
+
     logger.info("research_node_started", workflow_id=state.get("workflow_id"))
+
+    # Emit agent started event
+    if emitter:
+        await emitter.emit_agent_started("research")
 
     # Mark state as running research
     state = update_state_for_agent(state, AgentName.RESEARCH)
 
     try:
+        # Emit progress
+        if emitter:
+            await emitter.emit_agent_progress(
+                "research",
+                f"Researching {len(state.get('symbols', []))} symbols...",
+            )
+
         # Create agent and prepare input state
         agent = ResearchAgent()
         agent_state = AgentState(
@@ -81,10 +96,25 @@ async def research_node(state: PortfolioState) -> PortfolioState:
         # Update workflow state with results
         state = update_state_with_result(state, AgentName.RESEARCH, research_output)
 
+        duration_ms = (time.monotonic() - start_time) * 1000
+
+        # Emit agent completed event
+        if emitter:
+            await emitter.emit_agent_completed(
+                "research",
+                output={
+                    "symbols_researched": research_output.get("symbols_researched", []),
+                    "has_market_data": bool(research_output.get("market_data")),
+                    "news_count": len(research_output.get("news", [])),
+                },
+                duration_ms=duration_ms,
+            )
+
         logger.info(
             "research_node_completed",
             workflow_id=state.get("workflow_id"),
             symbols_count=len(state.get("symbols", [])),
+            duration_ms=round(duration_ms, 2),
         )
 
     except Exception as e:
@@ -94,6 +124,10 @@ async def research_node(state: PortfolioState) -> PortfolioState:
             error=str(e),
         )
         state["errors"].append(f"Research failed: {e!s}")
+
+        # Emit error event
+        if emitter:
+            await emitter.emit_error(str(e), agent="research")
 
     return state
 
@@ -110,12 +144,26 @@ async def analysis_node(state: PortfolioState) -> PortfolioState:
     Returns:
         Updated state with analysis results.
     """
+    start_time = time.monotonic()
+    emitter = get_emitter_from_state(state)
+
     logger.info("analysis_node_started", workflow_id=state.get("workflow_id"))
+
+    # Emit agent started event
+    if emitter:
+        await emitter.emit_agent_started("analysis")
 
     # Mark state as running analysis
     state = update_state_for_agent(state, AgentName.ANALYSIS)
 
     try:
+        # Emit progress
+        if emitter:
+            await emitter.emit_agent_progress(
+                "analysis",
+                "Analyzing portfolio risk and performance...",
+            )
+
         # Create agent and prepare input state
         agent = AnalysisAgent()
         agent_state = AgentState(
@@ -152,9 +200,24 @@ async def analysis_node(state: PortfolioState) -> PortfolioState:
         # Update workflow state with results
         state = update_state_with_result(state, AgentName.ANALYSIS, analysis_output)
 
+        duration_ms = (time.monotonic() - start_time) * 1000
+
+        # Emit agent completed event
+        if emitter:
+            await emitter.emit_agent_completed(
+                "analysis",
+                output={
+                    "has_risk_metrics": bool(analysis_output.get("risk_metrics")),
+                    "has_correlations": bool(analysis_output.get("correlations")),
+                    "recommendation_count": len(analysis_output.get("recommendations", [])),
+                },
+                duration_ms=duration_ms,
+            )
+
         logger.info(
             "analysis_node_completed",
             workflow_id=state.get("workflow_id"),
+            duration_ms=round(duration_ms, 2),
         )
 
     except Exception as e:
@@ -164,6 +227,10 @@ async def analysis_node(state: PortfolioState) -> PortfolioState:
             error=str(e),
         )
         state["errors"].append(f"Analysis failed: {e!s}")
+
+        # Emit error event
+        if emitter:
+            await emitter.emit_error(str(e), agent="analysis")
 
     return state
 
@@ -180,12 +247,26 @@ async def recommendation_node(state: PortfolioState) -> PortfolioState:
     Returns:
         Updated state with recommendations.
     """
+    start_time = time.monotonic()
+    emitter = get_emitter_from_state(state)
+
     logger.info("recommendation_node_started", workflow_id=state.get("workflow_id"))
+
+    # Emit agent started event
+    if emitter:
+        await emitter.emit_agent_started("recommendation")
 
     # Mark state as running recommendation
     state = update_state_for_agent(state, AgentName.RECOMMENDATION)
 
     try:
+        # Emit progress
+        if emitter:
+            await emitter.emit_agent_progress(
+                "recommendation",
+                "Generating trade recommendations...",
+            )
+
         # Create agent and prepare input state
         agent = RecommendationAgent()
         agent_state = AgentState(
@@ -227,10 +308,26 @@ async def recommendation_node(state: PortfolioState) -> PortfolioState:
             state, AgentName.RECOMMENDATION, recommendation_output
         )
 
+        duration_ms = (time.monotonic() - start_time) * 1000
+
+        # Emit agent completed event
+        if emitter:
+            await emitter.emit_agent_completed(
+                "recommendation",
+                output={
+                    "total_trades": recommendation_output.get("total_trades", 0),
+                    "buy_count": recommendation_output.get("buy_count", 0),
+                    "sell_count": recommendation_output.get("sell_count", 0),
+                    "hold_count": recommendation_output.get("hold_count", 0),
+                },
+                duration_ms=duration_ms,
+            )
+
         logger.info(
             "recommendation_node_completed",
             workflow_id=state.get("workflow_id"),
             trades_count=recommendation_output.get("total_trades", 0),
+            duration_ms=round(duration_ms, 2),
         )
 
     except Exception as e:
@@ -240,6 +337,10 @@ async def recommendation_node(state: PortfolioState) -> PortfolioState:
             error=str(e),
         )
         state["errors"].append(f"Recommendation failed: {e!s}")
+
+        # Emit error event
+        if emitter:
+            await emitter.emit_error(str(e), agent="recommendation")
 
     return state
 
