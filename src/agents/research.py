@@ -14,6 +14,8 @@ from src.agents.base import AgentState, BaseAgent
 from src.cache.manager import CacheManager
 from src.data.polygon import PolygonClient
 from src.data.router import DataSourceRouter
+from src.memory.manager import MemoryManager
+from src.memory.models import MemoryType
 from src.observability.tracing import traced_agent
 from src.tools.base import BaseTool, ToolRegistry
 from src.tools.market_data import MarketDataTool
@@ -98,6 +100,7 @@ class ResearchAgent(BaseAgent):
         polygon_client: PolygonClient | None = None,
         cache_manager: CacheManager | None = None,
         data_router: DataSourceRouter | None = None,
+        memory_manager: MemoryManager | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the Research Agent.
@@ -109,6 +112,7 @@ class ResearchAgent(BaseAgent):
             polygon_client: Optional Polygon.io client.
             cache_manager: Optional Redis cache manager.
             data_router: Optional DataSourceRouter (shared across tools).
+            memory_manager: Optional MemoryManager for long-term memory.
             **kwargs: Additional arguments passed to BaseAgent.
         """
         super().__init__(**kwargs)
@@ -121,6 +125,7 @@ class ResearchAgent(BaseAgent):
             )
 
         self._data_router = data_router
+        self._memory_manager = memory_manager
 
         # Set up tool registry
         if tool_registry is not None:
@@ -152,6 +157,11 @@ class ResearchAgent(BaseAgent):
 
     @property
     def system_prompt(self) -> str:
+        return self._base_system_prompt
+
+    @property
+    def _base_system_prompt(self) -> str:
+        """Return the base system prompt without memory context."""
         return """You are a financial research agent specialized in gathering market data and information.
 
 Your role is to:
@@ -171,12 +181,44 @@ Guidelines:
 - Report any errors or missing data clearly
 - Note the data source for transparency (polygon, yahoo, cache, mock)
 - Provide a brief summary of your findings
+- Reference relevant past analyses when available
 
 Output your findings in a structured format with:
 - Market data for each symbol (with source attribution)
 - Relevant news items
 - A summary of key observations
 - List of data sources used"""
+
+    async def _get_system_prompt_with_memory(
+        self,
+        symbols: list[str],
+        user_id: str | None = None,
+    ) -> str:
+        """Get system prompt with memory context injected.
+
+        Args:
+            symbols: Symbols being analyzed.
+            user_id: Optional user ID for user-specific memories.
+
+        Returns:
+            System prompt with memory context.
+        """
+        if self._memory_manager is None:
+            return self._base_system_prompt
+
+        try:
+            memory_context = await self._memory_manager.get_context_for_agent(
+                agent=self.name,
+                symbols=symbols,
+                user_id=user_id,
+            )
+
+            if memory_context:
+                return f"{self._base_system_prompt}\n\n{memory_context}"
+        except Exception as e:
+            self._logger.warning("memory_context_failed", error=str(e))
+
+        return self._base_system_prompt
 
     @property
     def tools(self) -> list[dict[str, Any]]:
@@ -292,6 +334,9 @@ Output your findings in a structured format with:
                        f"and {len(output.news_items)} news items.",
         })
 
+        # Store research results in memory for future context
+        await self._store_research_memory(symbols, output, state.context.get("user_id"))
+
         self._logger.info(
             "research_invoke_complete",
             symbols_count=len(symbols),
@@ -301,6 +346,64 @@ Output your findings in a structured format with:
         )
 
         return state
+
+    async def _store_research_memory(
+        self,
+        symbols: list[str],
+        output: ResearchOutput,
+        user_id: str | None,
+    ) -> None:
+        """Store research results as episodic memory.
+
+        Args:
+            symbols: Symbols that were analyzed.
+            output: The research output.
+            user_id: Optional user ID.
+        """
+        if self._memory_manager is None:
+            return
+
+        try:
+            # Store a memory for each symbol with significant data
+            for symbol, data in output.market_data.items():
+                if data.price is not None:
+                    # Build memory content
+                    parts = [f"Researched {symbol}"]
+                    if data.price:
+                        parts.append(f"price ${data.price:.2f}")
+                    if data.change_percent is not None:
+                        parts.append(f"change {data.change_percent:+.2f}%")
+                    if data.pe_ratio:
+                        parts.append(f"P/E {data.pe_ratio:.1f}")
+
+                    content = ", ".join(parts)
+
+                    # Build metrics metadata
+                    metrics: dict[str, float] = {}
+                    if data.price:
+                        metrics["price"] = data.price
+                    if data.change_percent is not None:
+                        metrics["change_percent"] = data.change_percent
+                    if data.pe_ratio:
+                        metrics["pe_ratio"] = data.pe_ratio
+
+                    await self._memory_manager.store_analysis_result(
+                        agent=self.name,
+                        symbol=symbol,
+                        summary=content,
+                        metrics=metrics,
+                        user_id=user_id,
+                        importance=0.5,
+                    )
+
+            self._logger.debug(
+                "research_memory_stored",
+                symbols=symbols,
+                user_id=user_id,
+            )
+        except Exception as e:
+            # Don't fail the research if memory storage fails
+            self._logger.warning("memory_storage_failed", error=str(e))
 
     def _generate_summary(self, output: ResearchOutput) -> str:
         """Generate a summary of research findings.
