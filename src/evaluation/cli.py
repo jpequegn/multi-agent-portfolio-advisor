@@ -361,6 +361,11 @@ def main() -> int:
         help="Run full evaluation suite",
     )
     run_parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="Run quick evaluation (default behavior)",
+    )
+    run_parser.add_argument(
         "--tags",
         help="Comma-separated tags to filter cases",
     )
