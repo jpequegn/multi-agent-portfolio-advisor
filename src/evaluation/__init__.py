@@ -4,6 +4,7 @@ This module provides tools for evaluating agent responses across
 multiple quality dimensions using LLM-as-judge and statistical testing.
 """
 
+from src.evaluation.dashboard import EvaluationDashboard
 from src.evaluation.judges import GroundTruthJudge, LLMJudge, SafetyJudge
 from src.evaluation.models import (
     ABTestConfig,
@@ -24,6 +25,7 @@ from src.evaluation.statistics import (
     calculate_p_value,
     calculate_std,
 )
+from src.evaluation.storage import EvaluationStorage
 
 __all__ = [
     # Models
@@ -49,4 +51,7 @@ __all__ = [
     "calculate_mean",
     "calculate_p_value",
     "calculate_std",
+    # Dashboard & Storage
+    "EvaluationDashboard",
+    "EvaluationStorage",
 ]
